@@ -1,0 +1,72 @@
+version: '3'
+
+vars:
+  GO_FILES: '{{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}.{{end}}'
+
+tasks:
+  hooks:install:
+    desc: Install repository Git hooks
+    cmds:
+      - lefthook install
+
+  hooks:uninstall:
+    desc: Uninstall repository Git hooks
+    cmds:
+      - lefthook uninstall
+
+  build:
+    desc: Build the Workspace Steward binary
+    cmds:
+      - sh -c 'revision=$(git rev-parse HEAD); test -z "$(git status --porcelain --untracked-files=all)" || revision="$revision-dirty"; go build -trimpath -ldflags "-X main.commit=$revision" -o bin/ws ./cmd/ws'
+
+  release:
+    desc: Build release archives
+    requires:
+      vars: [VERSION]
+    cmds:
+      - sh scripts/build-release.sh "{{.VERSION}}"
+
+  fix:format:
+    desc: Format repository files
+    cmds:
+      - gofmt -w {{.GO_FILES}}
+
+  verify:
+    desc: Run all local verification checks
+    cmds:
+      - task: verify:lint
+      - task: verify:test
+      - task: verify:quality
+
+  verify:lint:
+    desc: Run check-only linting against all files
+    cmds:
+      - task: verify:lint:gofmt
+      - task: verify:lint:go-vet
+      - task: verify:lint:shell-syntax
+
+  verify:lint:gofmt:
+    desc: Verify Go formatting
+    cmds:
+      - test -z "$(gofmt -l {{.GO_FILES}})"
+
+  verify:lint:go-vet:
+    desc: Run Go static analysis
+    cmds:
+      - go vet ./...
+
+  verify:lint:shell-syntax:
+    desc: Verify POSIX shell syntax
+    cmds:
+      - sh -c 'for script do sh -n "$script" || exit; done' -- {{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}$(rg --files -g '*.sh'){{end}}
+
+  verify:test:
+    desc: Run unit, race, and installer tests
+    cmds:
+      - go test -race ./...
+      - sh scripts/test-installer.sh
+
+  verify:quality:
+    desc: Run the pinned vulnerability scanner
+    cmds:
+      - go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...

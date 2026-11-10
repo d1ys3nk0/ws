@@ -1,0 +1,10 @@
+pre-commit:
+  commands:
+    gofmt:
+      glob: '*.go'
+      run: task verify:lint:gofmt -- {staged_files}
+    go-vet:
+      run: task verify:lint:go-vet
+    shell-syntax:
+      glob: '*.sh'
+      run: task verify:lint:shell-syntax -- {staged_files}

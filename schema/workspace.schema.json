@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/d1ys3nk0/ws/blob/main/schema/workspace.schema.json",
+  "title": "Workspace Steward configuration",
+  "description": "Structural validation; ws check additionally checks Git branch syntax, path safety, identities, runner values, and the dependency graph.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "root", "children"],
+  "properties": {
+    "version": {"const": 1},
+    "runners": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "shell": {"type": "string", "pattern": "[\\s\\S]*\\S[\\s\\S]*", "default": "bash"},
+        "python": {"type": "string", "pattern": "[\\s\\S]*\\S[\\s\\S]*", "default": "python"}
+      }
+    },
+    "root": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trunk"],
+      "properties": {
+        "trunk": {"type": "string", "minLength": 1},
+        "hooks": {"$ref": "#/$defs/hooks"}
+      }
+    },
+    "children": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/child"}
+    }
+  },
+  "$defs": {
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+        "shell": {"type": "string", "pattern": "[\\s\\S]*\\S[\\s\\S]*"},
+        "python": {"type": "string", "pattern": "[\\s\\S]*\\S[\\s\\S]*"}
+      },
+      "oneOf": [
+        {"required": ["shell"]},
+        {"required": ["python"]}
+      ]
+    },
+    "hooks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create-before": {"type": "array", "items": {"$ref": "#/$defs/hook"}},
+        "create-after": {"type": "array", "items": {"$ref": "#/$defs/hook"}},
+        "merge-before": {"type": "array", "items": {"$ref": "#/$defs/hook"}},
+        "merge-after": {"type": "array", "items": {"$ref": "#/$defs/hook"}},
+        "drop-before": {"type": "array", "items": {"$ref": "#/$defs/hook"}},
+        "drop-after": {"type": "array", "items": {"$ref": "#/$defs/hook"}}
+      }
+    },
+    "child": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path", "url", "trunk"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+          "not": {"const": "root"}
+        },
+        "path": {"type": "string", "minLength": 1},
+        "url": {"type": "string", "minLength": 1},
+        "trunk": {"type": "string", "minLength": 1},
+        "depends_on": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "hooks": {"$ref": "#/$defs/hooks"}
+      }
+    }
+  }
+}

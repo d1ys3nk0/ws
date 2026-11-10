@@ -1,0 +1,369 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/d1ys3nk0/ws/internal/ws"
+)
+
+// workspaceIdentity is the only selector exposed for v5 state.  Names are
+// branch implementation details and legacy tags are read-only compatibility.
+func workspaceIdentity(m *ws.Manifest) string {
+	if m.Version == 5 {
+		return m.WorkspaceID
+	}
+	return m.Tag
+}
+
+func workspaceBranch(m *ws.Manifest) string {
+	if m.Version == 5 {
+		return m.Name
+	}
+	return m.Tag
+}
+
+type pathResult struct {
+	Path string `json:"path"`
+}
+type inspectionResult struct {
+	ConfigurationDrift []string `json:"configuration_drift,omitempty"`
+	treeResult
+	Lifecycle *statusResult `json:"lifecycle,omitempty"`
+	verbose   bool
+}
+type overviewEntry struct {
+	ConfigurationDrift []string `json:"configuration_drift,omitempty"`
+	listResult
+	Dirty      *int                   `json:"dirty_repositories,omitempty"`
+	BaseUpdate string                 `json:"base_update"`
+	Operation  string                 `json:"operation"`
+	Inspection []treeRepositoryResult `json:"repositories"`
+}
+type overviewResult struct {
+	Workspaces []overviewEntry `json:"workspaces"`
+	verbose    bool
+}
+
+func inspectStatus(e *ws.Engine, selector, context string, verbose bool) (inspectionResult, error) {
+	result := inspectionResult{verbose: verbose}
+	var m *ws.Manifest
+	if selector != "" {
+		selected, err := e.Select(selector, context)
+		if err != nil {
+			return result, err
+		}
+		m = selected
+		context = m.Workspace
+	}
+	var report ws.TreeReport
+	var err error
+	if m != nil {
+		report, err = e.TreeManifest(m)
+	} else {
+		report, err = e.Tree(context)
+	}
+	if err != nil {
+		return result, err
+	}
+	result.treeResult = newTreeResult(report)
+	if report.Context == "workspace" {
+		if m == nil {
+			m = report.Manifest
+		}
+		result.ConfigurationDrift = e.ConfigurationDrift(m)
+		lifecycle := newStatusResult(m, e.Status(m))
+		if m.State == "dropped" {
+			lifecycle.State = ws.Lifecycle(operationLabel(m))
+		}
+		result.Lifecycle = &lifecycle
+	}
+	return result, nil
+}
+func inspectionFailed(rows []treeRepositoryResult) bool {
+	for _, r := range rows {
+		if r.TreeState == "error" || r.TreeState == "missing" || r.SyncState != nil && *r.SyncState == "error" {
+			return true
+		}
+	}
+	return false
+}
+func operationLabel(m *ws.Manifest) string {
+	switch m.State {
+	case "ready":
+		return "active"
+	case "integrated":
+		return "integrated — cleanup pending"
+	case "dropped":
+		for _, r := range m.Repositories {
+			if !r.Merged {
+				return "discarded"
+			}
+		}
+		return "merged"
+	default:
+		return string(m.State)
+	}
+}
+func inspectList(e *ws.Engine, context string, all, verbose bool) (overviewResult, error) {
+	result := overviewResult{Workspaces: []overviewEntry{}, verbose: verbose}
+	manifests, err := e.All()
+	if err != nil {
+		return result, err
+	}
+	lookup := map[string]*ws.Manifest{}
+	for _, m := range manifests {
+		lookup[workspaceIdentity(m)] = m
+	}
+	if absolute, err := filepath.Abs(context); err == nil {
+		context = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(context); err == nil {
+		context = resolved
+	}
+	for _, summary := range newListResults(manifests, context) {
+		m := lookup[summary.WorkspaceID]
+		if !all && m.State == "dropped" {
+			continue
+		}
+		entry := overviewEntry{ConfigurationDrift: e.ConfigurationDrift(m), listResult: summary, Operation: operationLabel(m), BaseUpdate: "current"}
+		report, err := e.TreeManifest(m)
+		if err != nil {
+			return result, err
+		}
+		entry.Inspection = newTreeResult(report).Repositories
+		dirty := 0
+		for _, r := range report.Repositories {
+			if r.TreeState == "changed" {
+				dirty++
+			}
+			if r.Behind > 0 {
+				entry.BaseUpdate = "needed"
+			}
+		}
+		if m.State == "dropped" {
+			entry.BaseUpdate = "not applicable"
+			entry.Dirty = nil
+		} else if inspectionFailed(entry.Inspection) {
+			entry.BaseUpdate = "unknown"
+		} else {
+			entry.Dirty = &dirty
+		}
+		result.Workspaces = append(result.Workspaces, entry)
+	}
+	return result, nil
+}
+func renderInspection(out io.Writer, v inspectionResult, style humanStyle) error {
+	for _, change := range v.ConfigurationDrift {
+		fmt.Fprintln(out, "Configuration: "+change)
+	}
+	if v.Lifecycle != nil {
+		fmt.Fprintf(out, "Workspace: %s (%s)\n", v.Lifecycle.WorkspaceID, humanLifecycle(v.Lifecycle.State))
+	} else {
+		fmt.Fprintln(out, "Base workspace (remote comparisons use cached refs)")
+	}
+	rows := [][]string{tableHeader(style, "Repository", "Branch", "Working tree", "Comparison target", "Ahead", "Behind")}
+	unselected := 0
+	for _, r := range v.Repositories {
+		if r.TreeState == "not selected" && !v.verbose {
+			unselected++
+			continue
+		}
+		b, target, ahead, behind := "—", "—", "—", "—"
+		if r.Branch != nil {
+			b = *r.Branch
+		}
+		if r.SyncTarget != nil {
+			target = *r.SyncTarget
+			if r.Cached != nil && *r.Cached {
+				target = "cached " + target
+			} else {
+				target = "local " + target
+			}
+		}
+		if r.Ahead != nil {
+			ahead = fmt.Sprint(*r.Ahead)
+		}
+		if r.Behind != nil {
+			behind = fmt.Sprint(*r.Behind)
+		}
+		state := r.TreeState
+		if state == "" {
+			state = "unknown"
+		}
+		rows = append(rows, []string{r.Name, b, state, target, ahead, behind})
+	}
+	if err := renderTable(out, rows); err != nil {
+		return err
+	}
+	if unselected > 0 {
+		fmt.Fprintf(out, "%d repositories not selected; use --verbose for details.\n", unselected)
+	}
+	for _, r := range v.Repositories {
+		if r.Detail != "" {
+			fmt.Fprintf(out, "%s: %s\n", r.Name, r.Detail)
+		}
+	}
+	if v.Lifecycle != nil {
+		if v.Lifecycle.State != "ready" {
+			completed, removed := 0, 0
+			for _, r := range v.Lifecycle.Repositories {
+				if r.Removed {
+					removed++
+				}
+				if r.Merged {
+					completed++
+				}
+			}
+			fmt.Fprintf(out, "Operation: %s; integration %d/%d; cleanup %d/%d\n", humanLifecycle(v.Lifecycle.State), completed, len(v.Lifecycle.Repositories), removed, len(v.Lifecycle.Repositories))
+		}
+		for _, h := range v.Lifecycle.Hooks {
+			if h.Status != "complete" {
+				fmt.Fprintf(out, "Hook %s/%s/%s: %s %s\n", h.Repository, h.Phase, h.ID, h.Status, h.Error)
+			}
+		}
+		if v.verbose {
+			return renderHumanStyled(out, *v.Lifecycle, style)
+		}
+	}
+	if v.verbose {
+		for _, r := range v.Repositories {
+			fmt.Fprintf(out, "%s: %s\n", r.Name, r.Path)
+		}
+	}
+	return nil
+}
+func humanLifecycle(state ws.Lifecycle) string {
+	if state == "integrated" {
+		return "integrated — cleanup pending"
+	}
+	if state == "ready" {
+		return "active"
+	}
+	return string(state)
+}
+func renderOverview(out io.Writer, v overviewResult, style humanStyle) error {
+	if len(v.Workspaces) == 0 {
+		_, err := fmt.Fprintln(out, "No managed workspaces.")
+		return err
+	}
+	counts := map[string]int{}
+	for _, c := range v.Workspaces {
+		for _, change := range c.ConfigurationDrift {
+			fmt.Fprintf(out, "Configuration %s: %s\n", c.WorkspaceID, change)
+		}
+		counts[c.Name]++
+	}
+	rows := [][]string{tableHeader(style, "", "Workspace", "Repos", "Dirty", "Base update", "Operation", "Age")}
+	for _, c := range v.Workspaces {
+		marker := ""
+		if c.current {
+			marker = "@"
+		}
+		name := c.Name
+		if counts[name] > 1 || v.verbose {
+			name = c.WorkspaceID
+		}
+		dirty := "unknown"
+		if c.Dirty != nil {
+			dirty = fmt.Sprint(*c.Dirty)
+		}
+		rows = append(rows, []string{marker, name, fmt.Sprint(c.RepositoryCount), dirty, c.BaseUpdate, c.Operation, age(time.Now(), c.CreatedAt)})
+	}
+	return renderTable(out, rows)
+}
+
+type progressEntry struct {
+	Repository  string `json:"repository"`
+	Integration string `json:"integration,omitempty"`
+	Cleanup     string `json:"cleanup,omitempty"`
+	Publication string `json:"publication,omitempty"`
+}
+type operationError struct {
+	Code         string          `json:"code"`
+	Message      string          `json:"message"`
+	Repository   string          `json:"repository,omitempty"`
+	WorkspaceID  string          `json:"workspace_id,omitempty"`
+	Command      string          `json:"command,omitempty"`
+	Progress     []progressEntry `json:"progress,omitempty"`
+	NextAction   string          `json:"next_action,omitempty"`
+	Finalization string          `json:"finalization,omitempty"`
+	cause        error
+}
+
+func (e *operationError) Error() string { return e.Message }
+func (e *operationError) Unwrap() error { return e.cause }
+func shellQuote(s string) string        { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+func operationFailure(command string, m *ws.Manifest, err error) error {
+	result := &operationError{Code: "external_command", Message: err.Error(), Command: command, cause: err}
+	var typed *ws.Error
+	if errors.As(err, &typed) {
+		result.Code, result.Repository = typed.Code, typed.Repository
+	}
+	var publication *ws.PublicationError
+	if errors.As(err, &publication) {
+		for _, name := range publication.Completed {
+			result.Progress = append(result.Progress, progressEntry{Repository: name, Publication: "complete"})
+		}
+		if publication.Blocked != "" {
+			result.Progress = append(result.Progress, progressEntry{Repository: publication.Blocked, Publication: "blocked"})
+		}
+		for _, name := range publication.Pending {
+			result.Progress = append(result.Progress, progressEntry{Repository: name, Publication: "pending"})
+		}
+		result.NextAction = "Inspect the reported remote failure and rerun ws " + command + "; completed publications are not rolled back."
+	}
+	if m != nil {
+		result.WorkspaceID = workspaceIdentity(m)
+		if command == "merge" || command == "cleanup" {
+			result.Finalization = "pending"
+			if m.State == "merge-finalizing" {
+				result.Finalization = "blocked"
+			}
+		}
+
+		if command == "merge" || command == "cleanup" || command == "drop" {
+			for _, r := range m.Repositories {
+				p := progressEntry{Repository: r.Repository.Name, Integration: "pending", Cleanup: "pending"}
+				if r.Merged {
+					p.Integration = "complete"
+				}
+				if r.Removed {
+					p.Cleanup = "complete"
+				}
+				if r.Repository.Name == result.Repository {
+					if r.Merged && !r.Removed {
+						p.Cleanup = "blocked"
+					} else if !r.Merged {
+						p.Integration = "blocked"
+					}
+				}
+				result.Progress = append(result.Progress, p)
+			}
+		}
+		selector := workspaceIdentity(m)
+		result.NextAction = "Inspect and repair the reported failure, then rerun: ws --workspace " + shellQuote(m.Origin) + " " + command + " " + shellQuote(selector)
+		if command == "create" {
+			selected := []string{}
+			for _, r := range m.Repositories {
+				if r.Repository.Name != "root" {
+					selected = append(selected, r.Repository.Name)
+				}
+			}
+			if len(selected) > 0 {
+				result.NextAction += " --only " + strings.Join(selected, ",")
+			} else if len(m.Config.Children) > 0 {
+				excluded := []string{}
+				for _, r := range m.Config.Children {
+					excluded = append(excluded, r.Name)
+				}
+				result.NextAction += " --except " + strings.Join(excluded, ",")
+			}
+		}
+	}
+	return result
+}

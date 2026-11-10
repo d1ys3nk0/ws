@@ -1,0 +1,697 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/d1ys3nk0/ws/internal/ws"
+)
+
+func runOutput(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	old := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	defer func() { os.Stdout = old; reader.Close(); writer.Close() }()
+	callErr := run(args)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if callErr != nil {
+		return string(data), callErr
+	}
+	return string(data), nil
+}
+
+func runJSON[T any](t *testing.T, args ...string) (T, error) {
+	t.Helper()
+	var result T
+	data, err := runOutput(t, args...)
+	if len(data) == 0 {
+		return result, err
+	}
+	if err := json.Unmarshal([]byte(data), &result); err != nil {
+		t.Fatalf("invalid result %q: %v", data, err)
+	}
+	return result, err
+}
+
+func runErrorOutput(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	old := os.Stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = writer
+	defer func() { os.Stderr = old; reader.Close(); writer.Close() }()
+	callErr := run(args)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if _, err := io.Copy(&output, reader); err != nil {
+		t.Fatal(err)
+	}
+	return output.String(), callErr
+}
+
+func runCapturedOutput(t *testing.T, args ...string) (string, string, error) {
+	t.Helper()
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout, os.Stderr = stdoutWriter, stderrWriter
+	defer func() {
+		os.Stdout, os.Stderr = oldStdout, oldStderr
+		stdoutReader.Close()
+		stderrReader.Close()
+		stdoutWriter.Close()
+		stderrWriter.Close()
+	}()
+	callErr := run(args)
+	if err := stdoutWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stderrWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := io.ReadAll(stdoutReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := io.ReadAll(stderrReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(stdout), string(stderr), callErr
+}
+
+func cliWorkspace(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if out, err := exec.Command("git", "init", root).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %s %v", out, err)
+	}
+	config := "version: 1\nroot:\n  trunk: main\nchildren:\n- name: api\n  path: repos/api\n  url: /nonexistent-disposable-remote\n  trunk: main\n"
+	if err := os.WriteFile(filepath.Join(root, "workspace.yml"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
+}
+
+func cliCleanWorkspace(t *testing.T) string {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_AUTHOR_NAME", "Workspace Steward Test")
+	t.Setenv("GIT_AUTHOR_EMAIL", "ws@example.test")
+	t.Setenv("GIT_COMMITTER_NAME", "Workspace Steward Test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "ws@example.test")
+	root := filepath.Join(t.TempDir(), "workspace")
+	for _, args := range [][]string{{"init", "--initial-branch=main", root}, {"-C", root, "config", "user.name", "Workspace Steward Test"}, {"-C", root, "config", "user.email", "ws@example.test"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+	}
+	config := "version: 1\nroot:\n  trunk: main\nchildren: []\n"
+	if err := os.WriteFile(filepath.Join(root, "workspace.yml"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", root, "add", "workspace.yml"}, {"-C", root, "commit", "-m", "chore: configure workspace"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+	}
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
+}
+
+func cliManagedChange(t *testing.T) (string, *ws.Manifest) {
+	t.Helper()
+	root := cliCleanWorkspace(t)
+	remote := filepath.Join(filepath.Dir(root), "workspace.git")
+	if out, err := exec.Command("git", "init", "--bare", "--initial-branch=main", remote).CombinedOutput(); err != nil {
+		t.Fatalf("git init remote: %s %v", out, err)
+	}
+	for _, args := range [][]string{{"-C", root, "remote", "add", "origin", remote}, {"-C", root, "push", "origin", "main"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+	}
+	engine, err := ws.Open(root, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest *ws.Manifest
+	if err := engine.Mutate(func() error {
+		var createErr error
+		manifest, createErr = engine.Create("context-selection")
+		return createErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return root, manifest
+}
+
+func cliManagedWorkspaceWithChild(t *testing.T) (string, *ws.Manifest) {
+	t.Helper()
+	root := cliCleanWorkspace(t)
+	child := filepath.Join(filepath.Dir(root), "api")
+	for _, args := range [][]string{
+		{"init", "--initial-branch=main", child},
+		{"-C", child, "config", "user.name", "Workspace Steward Test"},
+		{"-C", child, "config", "user.email", "ws@example.test"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(child, "README.md"), []byte("api\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", child, "add", "README.md"}, {"-C", child, "commit", "-m", "chore: initialize api"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+	}
+
+	config := fmt.Sprintf("version: 1\nroot:\n  trunk: main\nchildren:\n- name: api\n  path: repos/api\n  url: %s\n  trunk: main\n", child)
+	if err := os.WriteFile(filepath.Join(root, "workspace.yml"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("/repos/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rootRemote := filepath.Join(filepath.Dir(root), "workspace.git")
+	if out, err := exec.Command("git", "init", "--bare", "--initial-branch=main", rootRemote).CombinedOutput(); err != nil {
+		t.Fatalf("git init remote: %s %v", out, err)
+	}
+	for _, args := range [][]string{
+		{"-C", root, "add", "workspace.yml", ".gitignore"},
+		{"-C", root, "commit", "-m", "chore: configure api repository"},
+		{"-C", root, "remote", "add", "origin", rootRemote},
+		{"-C", root, "push", "origin", "main"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+	}
+	engine, err := ws.Open(root, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Bootstrap(); err != nil {
+		t.Fatal(err)
+	}
+	var manifest *ws.Manifest
+	if err := engine.Mutate(func() error {
+		var createErr error
+		manifest, createErr = engine.Create("missing-config")
+		return createErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return root, manifest
+}
+
+func TestVersionReportsBuildMetadata(t *testing.T) {
+	oldVersion, oldCommit := version, commit
+	version, commit = "test-release", "test-source"
+	defer func() { version, commit = oldVersion, oldCommit }()
+	human, err := runOutput(t, "version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if human != "ws test-release (test-source)\n" {
+		t.Fatalf("unexpected human version: %q", human)
+	}
+	result, err := runJSON[versionResult](t, "version", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Version != version || result.Commit != commit {
+		t.Fatalf("incorrect build metadata: %+v", result)
+	}
+}
+
+func TestCommandHelpOutsideWorkspace(t *testing.T) {
+	t.Chdir(t.TempDir())
+	output, err := runErrorOutput(t, "merge", "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "--message") || strings.Contains(output, "--only") {
+		t.Fatalf("command help option scope: %s", output)
+	}
+	output, err = runErrorOutput(t, "--help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output, "--message") {
+		t.Fatalf("top-level help exposes merge options: %s", output)
+	}
+}
+
+func TestMergeOverrideFlagsValidationAndDryRun(t *testing.T) {
+	root, manifest := cliManagedChange(t)
+	result, err := runJSON[dryRunResult](t, "merge", manifest.WorkspaceID, "--ignore-hook-failures", "--skip-hooks", "merge-after,merge-before", "--skip-hook-git-hooks", "--dry-run", "--json", "--workspace", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IgnoreHookFailures || !result.SkipHookGitHooks || strings.Join(result.SkippedHookPhases, ",") != "merge-before,merge-after" {
+		t.Fatalf("merge override dry-run omitted options: %+v", result)
+	}
+	if !result.DeletesIgnoredContent {
+		t.Fatalf("merge dry-run omitted ignored-content deletion: %+v", result)
+	}
+	human, err := runOutput(t, "merge", manifest.WorkspaceID, "--ignore-hook-failures", "--skip-hooks=merge-before", "--skip-hook-git-hooks", "--dry-run", "--workspace", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Ignore hook failures: true", "Delete ignored content: true", "Skipped hook phases: merge-before", "Git hooks inside lifecycle hooks suppressed: true"} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("human dry-run missing %q:\n%s", want, human)
+		}
+	}
+	for _, command := range []string{"drop"} {
+		other, dryRunErr := runJSON[dryRunResult](t, command, manifest.WorkspaceID, "--dry-run", "--json", "--workspace", root)
+		if dryRunErr != nil {
+			t.Fatal(dryRunErr)
+		}
+		if other.DeletesIgnoredContent {
+			t.Fatalf("%s dry-run claims ignored-content deletion: %+v", command, other)
+		}
+	}
+	for name, args := range map[string][]string{
+		"blank":           {"merge", manifest.WorkspaceID, "--skip-hooks=", "--workspace", root},
+		"trailing":        {"merge", manifest.WorkspaceID, "--skip-hooks", "merge-before,", "--workspace", root},
+		"whitespace":      {"merge", manifest.WorkspaceID, "--skip-hooks", "merge-before, merge-after", "--workspace", root},
+		"duplicate":       {"merge", manifest.WorkspaceID, "--skip-hooks", "merge-before,merge-before", "--workspace", root},
+		"unsupported":     {"merge", manifest.WorkspaceID, "--skip-hooks", "create-after", "--workspace", root},
+		"placement":       {"status", manifest.WorkspaceID, "--skip-hooks", "merge-before", "--workspace", root},
+		"git-placement":   {"status", manifest.WorkspaceID, "--skip-hook-git-hooks", "--workspace", root},
+		"force-placement": {"status", manifest.WorkspaceID, "-f", "--workspace", root},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := runOutput(t, args...); err == nil {
+				t.Fatal("invalid merge override accepted")
+			}
+		})
+	}
+}
+
+func TestCLIUsesDefaultMergeMessage(t *testing.T) {
+	root, manifest := cliManagedChange(t)
+	if _, err := runOutput(t, "merge", manifest.WorkspaceID, "--workspace", root); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := ws.Open(root, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := engine.Select(manifest.WorkspaceID, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.MergeMessage != "chore(ws): integrate workspace" {
+		t.Fatalf("default message = %q", stored.MergeMessage)
+	}
+}
+
+func TestCreateSelectionFlags(t *testing.T) {
+	root := cliPlanWorkspace(t)
+	result, err := runJSON[dryRunResult](t, "create", "partial", "--only", "api", "--dry-run", "--json", "--workspace", root)
+	if err != nil && len(result.Blockers) == 0 {
+		t.Fatal(err)
+	}
+	if len(result.Resources) != 2 || result.Resources[1] != filepath.Join(result.Workspace, "repos/api") {
+		t.Fatalf("--only dry-run resources: %+v", result.Resources)
+	}
+	result, err = runJSON[dryRunResult](t, "create", "root-only", "--except=api", "--dry-run", "--json", "--workspace", root)
+	if err != nil && len(result.Blockers) == 0 {
+		t.Fatal(err)
+	}
+	if len(result.Resources) != 1 || result.Resources[0] != result.Workspace {
+		t.Fatalf("--except dry-run resources: %+v", result.Resources)
+	}
+	for name, args := range map[string][]string{
+		"unsupported": {"status", "--only", "api", "--workspace", root},
+		"both":        {"create", "bad", "--only", "api", "--except", "api", "--workspace", root},
+		"empty":       {"create", "bad", "--only=", "--workspace", root},
+		"blank":       {"create", "bad", "--only", "api,", "--workspace", root},
+		"duplicate":   {"create", "bad", "--only", "api,api", "--workspace", root},
+		"root":        {"create", "bad", "--only", "root", "--workspace", root},
+		"unknown":     {"create", "bad", "--only", "web", "--workspace", root},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := runOutput(t, args...); err == nil {
+				t.Fatal("invalid selection flags accepted")
+			}
+		})
+	}
+}
+
+func TestMissingCommandProvidesHelpDirection(t *testing.T) {
+	_, err := runErrorOutput(t)
+	if err == nil || !strings.Contains(err.Error(), "ws --help") {
+		t.Fatalf("missing usage direction: %v", err)
+	}
+}
+
+func TestCommandRejectsUnexpectedArguments(t *testing.T) {
+	for _, args := range [][]string{{"version", "extra"}, {"check", "--config-only", "extra"}, {"list", "extra"}, {"status", "extra"}, {"fetch", "extra"}, {"fetch", "--force"}, {"pull", "extra"}, {"pull", "--force"}, {"refresh", "change"}, {"push", "extra"}, {"push", "--force"}, {"push", "--only", "api"}, {"create", "one", "two"}, {"version", "--force"}, {"version", "--unknown"}, {"check", "--config-only", "--workspace"}} {
+		t.Run(args[0]+"/"+args[len(args)-1], func(t *testing.T) {
+			if _, err := runOutput(t, args...); err == nil {
+				t.Fatal("unexpected arguments accepted")
+			}
+		})
+	}
+}
+
+func TestWorkspaceOverrideAndFlagsAfterCommand(t *testing.T) {
+	root := cliWorkspace(t)
+	for _, args := range [][]string{{"--workspace", root, "--json", "check", "--config-only"}, {"check", "--config-only", "--workspace", root, "--json"}, {"check", "--config-only", "--workspace=" + root, "--json"}} {
+		result, err := runJSON[validateResult](t, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Valid || result.Workspace != root {
+			t.Fatalf("wrong workspace: %+v", result)
+		}
+	}
+}
+
+func TestTreeWorkspaceOverrideSelectsRequestedContext(t *testing.T) {
+	root, manifest := cliManagedChange(t)
+	base, err := runJSON[treeResult](t, "status", "--json", "--workspace", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.Context != "base" || base.WorkspaceID != "" || base.Workspace != root {
+		t.Fatalf("explicit base workspace selected wrong context: %+v", base)
+	}
+	change, err := runJSON[treeResult](t, "status", "--json", "--workspace", manifest.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if change.Context != "workspace" || change.WorkspaceID != manifest.WorkspaceID || change.Workspace != manifest.Workspace {
+		t.Fatalf("explicit Change workspace selected wrong context: %+v", change)
+	}
+}
+
+func TestDryRunCreatesNoResources(t *testing.T) {
+	root := cliPlanWorkspace(t)
+	for _, args := range [][]string{{"bootstrap", "--dry-run", "--json", "--workspace", root}, {"create", "example-change", "--dry-run", "--json", "--workspace", root}, {"fetch", "--dry-run", "--json", "--workspace", root}, {"pull", "--dry-run", "--json", "--workspace", root}, {"push", "--dry-run", "--json", "--workspace", root}} {
+		result, err := runJSON[dryRunResult](t, args...)
+		if err != nil && len(result.Blockers) == 0 {
+			t.Fatal(err)
+		}
+		if !result.DryRun {
+			t.Fatalf("not a dry-run result: %+v", result)
+		}
+		if result.DeletesIgnoredContent {
+			t.Fatalf("non-merge dry-run claims ignored-content deletion: %+v", result)
+		}
+		if path := result.Workspace; path != "" && path != root {
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatalf("dry run created %s", path)
+			}
+		}
+	}
+	result, err := runJSON[dryRunResult](t, "push", "--dry-run", "--json", "--workspace", root)
+	if err != nil && len(result.Blockers) == 0 {
+		t.Fatal(err)
+	}
+	if len(result.Resources) != 2 || result.Resources[0] != root || result.Resources[1] != filepath.Join(root, "repos", "api") {
+		t.Fatalf("push dry-run resources: %+v", result.Resources)
+	}
+	for _, path := range []string{filepath.Join(root, "repos"), filepath.Join(root, ".git", "ws")} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("dry run created %s", path)
+		}
+	}
+}
+
+func TestCLIPushReportsResultAndProgress(t *testing.T) {
+	root := cliCleanWorkspace(t)
+	remote := filepath.Join(filepath.Dir(root), "workspace.git")
+	if out, err := exec.Command("git", "init", "--bare", "--initial-branch=main", remote).CombinedOutput(); err != nil {
+		t.Fatalf("git init remote: %s %v", out, err)
+	}
+	for _, args := range [][]string{{"-C", root, "remote", "add", "origin", remote}, {"-C", root, "push", "origin", "main"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "published.txt"), []byte("published\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", root, "add", "published.txt"}, {"-C", root, "commit", "-m", "feat: publish workspace"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+	}
+	stdout, stderr, err := runCapturedOutput(t, "push", "--json", "--color=always", "--workspace", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result commandResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("invalid JSON stdout %q: %v", stdout, err)
+	}
+	if result.Command != "push" || !result.Complete || result.Workspace != root {
+		t.Fatalf("unexpected push result: %+v", result)
+	}
+	if strings.Contains(stdout, "\x1b[") || strings.Contains(stderr, "\x1b[") {
+		t.Fatalf("JSON mode emitted ANSI: stdout %q, stderr %q", stdout, stderr)
+	}
+	for _, want := range []string{"[push/root @ " + root + "] preflight complete for trunk main", "[push/root @ " + root + "] pushed trunk main"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("push progress missing %q:\n%s", want, stderr)
+		}
+	}
+	human, err := runOutput(t, "push", "--workspace", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if human != "Push complete.\nWorkspace: "+root+"\n" {
+		t.Fatalf("unexpected human push result: %q", human)
+	}
+}
+
+func TestJSONResultRemainsOnStdoutWhileProgressUsesStderr(t *testing.T) {
+	root := cliCleanWorkspace(t)
+	remote := filepath.Join(filepath.Dir(root), "workspace.git")
+	if out, err := exec.Command("git", "init", "--bare", "--initial-branch=main", remote).CombinedOutput(); err != nil {
+		t.Fatalf("git init remote: %s %v", out, err)
+	}
+	for _, args := range [][]string{{"-C", root, "remote", "add", "origin", remote}, {"-C", root, "push", "origin", "main"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+	}
+	stdout, stderr, err := runCapturedOutput(t, "create", "json-progress", "--json", "--workspace", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result createResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("invalid JSON stdout %q: %v", stdout, err)
+	}
+	if !strings.Contains(stderr, "] created managed worktree at ") || strings.Contains(stdout, "[create/") {
+		t.Fatalf("stdout/stderr were not isolated:\nstdout: %s\nstderr: %s", stdout, stderr)
+	}
+}
+
+func TestStatusSupportsBaseAndRejectsUnknownSelection(t *testing.T) {
+	root, _ := cliManagedChange(t)
+	result, err := runJSON[inspectionResult](t, "status", "--json", "--workspace", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Context != "base" {
+		t.Fatalf("wrong context %+v", result)
+	}
+	if _, err := runOutput(t, "status", "missing-change", "--workspace", root); err == nil {
+		t.Fatal("accepted unknown selector")
+	}
+}
+
+func TestChangeCommandsUseContextAwareSelection(t *testing.T) {
+	root, manifest := cliManagedChange(t)
+	nested := filepath.Join(manifest.Workspace, "nested", "deeper")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatal(err)
+	}
+	originalCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalCWD); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{name: "status", args: []string{"status", "--json"}},
+		{name: "refresh", args: []string{"refresh", "--dry-run", "--json"}},
+		{name: "merge", args: []string{"merge", "--dry-run", "--message", "feat: select contextual change", "--json"}},
+		{name: "drop", args: []string{"drop", "--dry-run", "--json"}},
+	}
+	type selectedResult struct {
+		WorkspaceID string `json:"workspace_id"`
+	}
+	assertSelected := func(t *testing.T, command []string, selector string, workspaceOverride bool) {
+		t.Helper()
+		args := append([]string{}, command...)
+		if selector != "" {
+			args = append(args, selector)
+		}
+		if workspaceOverride {
+			args = append(args, "--workspace", root)
+		}
+		result, err := runJSON[selectedResult](t, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.WorkspaceID != manifest.WorkspaceID {
+			t.Fatalf("selected %q, want %q", result.WorkspaceID, manifest.WorkspaceID)
+		}
+	}
+
+	for _, cwd := range []string{manifest.Workspace, nested} {
+		if err := os.Chdir(cwd); err != nil {
+			t.Fatal(err)
+		}
+		for _, command := range commands {
+			t.Run(command.name+"/implicit/"+filepath.Base(cwd), func(t *testing.T) {
+				assertSelected(t, command.args, "", false)
+			})
+		}
+	}
+
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range commands {
+		t.Run(command.name+"/outside", func(t *testing.T) {
+			args := append(append([]string{}, command.args...), "--workspace", root)
+			if command.name == "status" {
+				if _, err := runOutput(t, args...); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if _, err := runOutput(t, args...); err == nil || err.Error() != "workspace ID or path is required outside a managed workspace" {
+				t.Fatalf("unexpected omitted-selection error: %v", err)
+			}
+		})
+		for _, selector := range []string{manifest.WorkspaceID, manifest.Workspace} {
+			t.Run(command.name+"/explicit/"+filepath.Base(selector), func(t *testing.T) {
+				assertSelected(t, command.args, selector, true)
+			})
+		}
+		t.Run(command.name+"/unknown", func(t *testing.T) {
+			args := append(append([]string{}, command.args...), "missing-change", "--workspace", root)
+			if _, err := runOutput(t, args...); err == nil || !strings.Contains(err.Error(), `no managed workspace matches "missing-change"`) {
+				t.Fatalf("unexpected explicit-selection error: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckAndPruneCLIContracts(t *testing.T) {
+	root := cliCleanWorkspace(t)
+	check, err := runJSON[ws.AuditReport](t, "check", "--json", "--workspace", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !check.Clean || check.Workspace != root || len(check.Repositories) != 1 {
+		t.Fatalf("unexpected clean check result: %+v", check)
+	}
+	if out, err := exec.Command("git", "-C", root, "branch", "unexpected").CombinedOutput(); err != nil {
+		t.Fatalf("create branch: %s %v", out, err)
+	}
+
+	data, err := runOutput(t, "check", "--json", "--workspace", root)
+	if err == nil {
+		t.Fatal("dirty check returned success")
+	}
+	var dirty ws.AuditReport
+	if json.Unmarshal([]byte(data), &dirty) != nil || dirty.Clean || len(dirty.Issues) == 0 {
+		t.Fatalf("invalid dirty check payload: %q", data)
+	}
+
+	data, err = runOutput(t, "prune", "--dry-run", "--json", "--workspace", root)
+	if err == nil {
+		t.Fatal("incomplete prune preview returned success")
+	}
+	var preview ws.PruneReport
+	if json.Unmarshal([]byte(data), &preview) != nil || preview.Complete || len(preview.Actions) != 1 {
+		t.Fatalf("invalid prune preview: %q", data)
+	}
+	if out, err := exec.Command("git", "-C", root, "show-ref", "--verify", "refs/heads/unexpected").CombinedOutput(); err != nil {
+		t.Fatalf("dry run removed branch: %s %v", out, err)
+	}
+
+	oldTerminal, oldInput := stdinIsTerminal, commandInput
+	defer func() { stdinIsTerminal, commandInput = oldTerminal, oldInput }()
+	stdinIsTerminal = func() bool { return false }
+	if _, err := runOutput(t, "prune", "--workspace", root); err == nil || !strings.Contains(err.Error(), "interactive terminal") {
+		t.Fatalf("non-interactive prune accepted: %v", err)
+	}
+	stdinIsTerminal = func() bool { return true }
+	commandInput = strings.NewReader("yes\n")
+	pruned, err := runJSON[ws.PruneReport](t, "prune", "--json", "--workspace", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pruned.Complete || len(pruned.Actions) != 1 || pruned.Actions[0].Status != ws.PruneCompleted {
+		t.Fatalf("unexpected prune result: %+v", pruned)
+	}
+}
+
+func cliPlanWorkspace(t *testing.T) string {
+	t.Helper()
+	root := cliCleanWorkspace(t)
+	if out, err := exec.Command("git", "-C", root, "remote", "add", "origin", "/nonexistent-disposable-remote").CombinedOutput(); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	data := "version: 1\nroot:\n  trunk: main\nchildren:\n- name: api\n  path: repos/api\n  url: /nonexistent-disposable-remote\n  trunk: main\n"
+	if err := os.WriteFile(filepath.Join(root, "workspace.yml"), []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
