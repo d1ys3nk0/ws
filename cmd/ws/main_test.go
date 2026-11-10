@@ -379,8 +379,20 @@ func TestCreateSelectionFlags(t *testing.T) {
 	}
 }
 
-func TestMissingCommandProvidesHelpDirection(t *testing.T) {
-	_, err := runErrorOutput(t)
+func TestNoArgumentsShowsHelp(t *testing.T) {
+	t.Chdir(t.TempDir())
+	out, help, err := runCapturedOutput(t)
+	if err != nil || out != "" || !strings.Contains(help, "Usage: ws ") {
+		t.Fatalf("bare invocation: stdout=%q stderr=%q err=%v", out, help, err)
+	}
+	_, explicit, err := runCapturedOutput(t, "--help")
+	if err != nil || help != explicit {
+		t.Fatalf("explicit help differs: stderr=%q err=%v", explicit, err)
+	}
+}
+
+func TestFlagsWithoutCommandProvideHelpDirection(t *testing.T) {
+	_, err := runErrorOutput(t, "--json")
 	if err == nil || !strings.Contains(err.Error(), "ws --help") {
 		t.Fatalf("missing usage direction: %v", err)
 	}

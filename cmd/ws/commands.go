@@ -151,7 +151,8 @@ func parseArguments(args []string) (options, string, string, error) {
 		return o, "", "", err
 	}
 	if len(pos) == 0 {
-		if o.help {
+		if o.help || len(args) == 0 {
+			o.help = true
 			return o, "", "", nil
 		}
 		return o, "", "", fmt.Errorf("command required; run ws --help")
