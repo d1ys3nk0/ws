@@ -156,7 +156,7 @@ func safePath(root, rel string) error {
 		return fmt.Errorf("invalid repository path %q", rel)
 	}
 	for _, p := range strings.Split(filepath.ToSlash(rel), "/") {
-		if p == ".git" {
+		if strings.EqualFold(p, ".git") {
 			return fmt.Errorf("repository path cannot contain .git")
 		}
 	}

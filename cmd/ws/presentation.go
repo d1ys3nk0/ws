@@ -497,6 +497,16 @@ func renderHumanStyled(out io.Writer, result any, style humanStyle) error {
 		return renderInspection(out, value, style)
 	case overviewResult:
 		return renderOverview(out, value, style)
+	case ws.CloneResult:
+		if _, err := fmt.Fprintln(out, "Cloned root:", value.Root); err != nil {
+			return err
+		}
+		for _, r := range value.Repositories {
+			if _, err := fmt.Fprintf(out, "  %s: %s %s (trunk %s)\n", r.Name, r.Outcome, r.Path, r.Trunk); err != nil {
+				return err
+			}
+		}
+		return nil
 	case ws.InitResult:
 		_, err := fmt.Fprintf(out, "Configuration: %s\nTrunk: %s\nConfigure children, then run ws bootstrap.\n", value.Path, value.Trunk)
 		return err

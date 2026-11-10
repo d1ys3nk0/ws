@@ -32,6 +32,7 @@ var commands = []commandDefinition{
 	{"fetch", "", "Update cached remote trunk refs.", []string{"dry-run"}, 0, 0},
 	{"pull", "", "Fetch and rebase canonical local trunks.", []string{"dry-run"}, 0, 0},
 	{"push", "", "Publish child trunks, then the root trunk.", []string{"dry-run"}, 0, 0},
+	{"clone", "<remote> [destination]", "Clone a root and its configured child repositories.", nil, 1, 2},
 	{"init", "", "Create minimal configuration in a canonical Git checkout.", []string{"trunk", "dry-run"}, 0, 0},
 	{"bootstrap", "", "Clone missing configured repositories.", []string{"dry-run"}, 0, 0},
 	{"check", "", "Audit configuration, ownership, and Git resources.", []string{"config-only"}, 0, 0},
@@ -51,6 +52,13 @@ var optionDescriptions = map[string]string{
 
 const helpText = "Workspace Steward manages one workspace across multiple Git repositories.\n\nUsage: ws [global options] <command> [arguments]\n"
 
+func globalOptions(command string) []string {
+	if command == "clone" {
+		return []string{"json", "color", "help"}
+	}
+	return []string{"workspace", "json", "color", "help"}
+}
+
 func commandHelp(command string) string {
 	var b strings.Builder
 	if command == "" {
@@ -62,7 +70,7 @@ func commandHelp(command string) string {
 			if i == 0 {
 				b.WriteString("\nEveryday workflow:\n")
 			}
-			if c.name == "init" {
+			if c.name == "clone" {
 				b.WriteString("\nSetup and maintenance:\n")
 			}
 			fmt.Fprintf(&b, "  %-12s %-20s %s\n", c.name, c.arguments, c.description)
@@ -82,14 +90,14 @@ func commandHelp(command string) string {
 		}
 	}
 	b.WriteString("\nGlobal options:\n")
-	for _, o := range []string{"workspace", "json", "color", "help"} {
+	for _, o := range globalOptions(command) {
 		prefix := "--"
 		if len(o) == 1 {
 			prefix = "-"
 		}
 		fmt.Fprintf(&b, "  %-26s %s\n", prefix+o, optionDescriptions[o])
 	}
-	if command != "" {
+	if command != "" && command != "clone" {
 		b.WriteString("\nWorkspace selectors accept an exact workspace ID or path. Omitted selectors use\n--workspace, otherwise the current directory. Flags may follow arguments.\n")
 	}
 	if command == "merge" {
@@ -99,7 +107,7 @@ func commandHelp(command string) string {
 }
 
 type options struct {
-	workspace, existingRoot, only, except, message, skipHooks, retryHook, trunk, name, adapterPath                                                                       string
+	workspace, existingRoot, only, except, message, skipHooks, retryHook, trunk, name, adapterPath, destination                                                          string
 	color                                                                                                                                                                colorMode
 	stat, committed, patch, keep, adoptConfig, fetch, json, dry, force, remove, skipHookGit, ignoreHookFailures, noCD, verbose, all, configOnly, base, acknowledge, help bool
 }
@@ -165,7 +173,10 @@ func parseArguments(args []string) (options, string, string, error) {
 	if len(pos)-1 < def.min || len(pos)-1 > def.max {
 		return o, command, "", fmt.Errorf("usage: ws %s %s", command, def.arguments)
 	}
-	allowed := map[string]bool{"workspace": true, "json": true, "color": true, "help": true, "h": true}
+	allowed := map[string]bool{"h": true}
+	for _, name := range globalOptions(command) {
+		allowed[name] = true
+	}
 	for _, name := range def.options {
 		allowed[name] = true
 	}
@@ -201,6 +212,12 @@ func parseArguments(args []string) (options, string, string, error) {
 			return o, command, "", fmt.Errorf("usage: ws shell init bash|zsh")
 		}
 		arg = pos[2]
+	}
+	if command == "clone" && len(pos) == 3 {
+		o.destination = pos[2]
+		if o.destination == "" {
+			return o, command, arg, fmt.Errorf("clone destination must not be empty")
+		}
 	}
 	if command == "_integrate-adapter" && len(pos) == 3 {
 		o.adapterPath = pos[2]

@@ -15,7 +15,9 @@ curl -fsSL https://github.com/d1ys3nk0/ws/releases/latest/download/install.sh | 
 
 Release binaries support macOS and Linux on amd64 and arm64. The installer resolves one release, verifies its archive against that release's SHA-256 checksums, and installs into `/usr/local/bin`. To select a release or destination, download and inspect the installer, then run `WS_VERSION=v0.0.1 WS_INSTALL_DIR="$HOME/.local/bin" sh install.sh`.
 
-Initialize the canonical root checkout and declare children in `workspace.yml`:
+Clone an existing workspace with `ws clone <remote> [destination]`. Workspace Steward checks out the root's default branch and clones the children declared in its `workspace.yml`. If the file is missing, the command warns and keeps the root checkout. If a child clone fails, fix the reported problem and run `ws bootstrap` in the root to resume.
+
+To set up a workspace in an existing checkout, initialize the root and declare children in `workspace.yml`.
 
 ```sh
 ws init

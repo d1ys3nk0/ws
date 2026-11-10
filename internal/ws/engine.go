@@ -191,27 +191,13 @@ func (e *Engine) Mutate(fn func() error) error {
 	return fn()
 }
 func (e *Engine) Bootstrap() error {
-	ordered, _ := e.Config.Order()
-	for _, r := range ordered {
-		path := filepath.Join(e.Root, r.Path)
-		if _, err := os.Lstat(path); err == nil {
-			if err = validateOrigin(path, r); err != nil {
-				return err
-			}
-			e.logOperationOutcome("bootstrap", r.Name, path, "", "validated", LogSuccess, " existing checkout on trunk %s", r.Trunk)
-			continue
-		} else if !os.IsNotExist(err) {
-			return err
+	return bootstrap(e.Root, e.Config, func(result CloneRepository) {
+		semantic, detail := LogChanged, " trunk %s"
+		if result.Outcome == "validated" {
+			semantic, detail = LogSuccess, " existing checkout on trunk %s"
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-			return err
-		}
-		if _, err := git(e.Root, "clone", "--branch", r.Trunk, "--", r.URL, path); err != nil {
-			return fmt.Errorf("repository %s bootstrap: %w; remove incomplete clone after inspection and retry", r.Name, err)
-		}
-		e.logOperationOutcome("bootstrap", r.Name, path, "", "cloned", LogChanged, " trunk %s", r.Trunk)
-	}
-	return nil
+		e.logOperationOutcome("bootstrap", result.Name, result.Path, "", result.Outcome, semantic, detail, result.Trunk)
+	})
 }
 func (e *Engine) backup(operation, path, label string, m *Manifest) error {
 	dir := filepath.Join(e.store.dir, "recovery")

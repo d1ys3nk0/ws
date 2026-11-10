@@ -53,6 +53,19 @@ func run(args []string) error {
 	if err != nil && workspace == "" {
 		return err
 	}
+	if command == "clone" {
+		result, cloneErr := ws.Clone(cwd, arg, opts.destination)
+		if cloneErr != nil {
+			if !jsonOutput && result.Root != "" {
+				_ = output(result)
+			}
+			return cloneErr
+		}
+		if !jsonOutput && result.Warning != "" {
+			fmt.Fprintln(os.Stderr, stderrStyle.paint(semanticYellow, "Warning:")+" "+result.Warning)
+		}
+		return output(result)
+	}
 	if workspace == "" {
 		workspace = cwd
 	}

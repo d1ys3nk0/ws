@@ -135,7 +135,7 @@ func complete(engine *ws.Engine, kind string) error {
 		}
 		for _, c := range commands {
 			if c.name == strings.TrimPrefix(kind, "flags:") {
-				for _, f := range append([]string{"workspace", "json", "color", "help"}, c.options...) {
+				for _, f := range append(globalOptions(c.name), c.options...) {
 					if f == "f" {
 						fmt.Fprintln(os.Stdout, "-f")
 					} else {
