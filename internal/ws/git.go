@@ -109,6 +109,10 @@ func originRoot(root string) (string, error) {
 	return filepath.Dir(common), nil
 }
 func validateOrigin(path string, r Repository) error {
+	return validateOriginFrom(path, r, "")
+}
+
+func validateOriginFrom(path string, r Repository, sourceDir string) error {
 	top, e := git(path, "rev-parse", "--show-toplevel")
 	if e != nil {
 		return e
@@ -124,8 +128,25 @@ func validateOrigin(path string, r Repository) error {
 	if e != nil {
 		return e
 	}
-	if u != r.URL {
+	if u != r.URL && !sameRelativeOrigin(sourceDir, r.URL, u) {
 		return fmt.Errorf("repository %s: origin mismatch: got %q, expected %q", r.Name, redactURLCredentials(u), redactURLCredentials(r.URL))
 	}
 	return nil
+}
+
+func sameRelativeOrigin(sourceDir, expected, actual string) bool {
+	first, _, _ := strings.Cut(expected, "/")
+	if sourceDir == "" || !filepath.IsAbs(actual) || filepath.IsAbs(expected) || strings.Contains(first, ":") || strings.Contains(expected, "://") {
+		return false
+	}
+	expectedPath := sourceDir + string(filepath.Separator) + expected
+	if actual == expectedPath {
+		return true
+	}
+	expectedPath, err := filepath.EvalSymlinks(expectedPath)
+	if err != nil {
+		return false
+	}
+	actualPath, err := filepath.EvalSymlinks(actual)
+	return err == nil && actualPath == expectedPath
 }

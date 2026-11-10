@@ -129,28 +129,50 @@ children:
 	}
 }
 
+func TestCloneCLILocalBundle(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	source := cloneSource(t, dir, "source")
+	extendedGit(t, source, "bundle", "create", filepath.Join(dir, "archive.bundle"), "--all")
+
+	got, err := runJSON[ws.CloneResult](t, "clone", "archive.bundle", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(got.Root) != "archive" {
+		t.Fatalf("bundle checkout = %q, want archive", got.Root)
+	}
+	extendedGit(t, got.Root, "rev-parse", "--verify", "HEAD")
+}
+
 func TestCloneCLIResumesWithBootstrap(t *testing.T) {
-	sources, dest := t.TempDir(), t.TempDir()
-	root := cloneSource(t, sources, "root")
-	first := cloneSource(t, sources, "first")
-	second := filepath.Join(sources, "second")
-	writeCloneConfig(t, root, fmt.Sprintf(`version: 1
+	dir := t.TempDir()
+	root := cloneSource(t, dir, "root")
+	cloneSource(t, dir, "first")
+	writeCloneConfig(t, root, `version: 1
 root: {trunk: main}
 children:
-  - {name: first, path: first, url: %q, trunk: main}
-  - {name: second, path: second, url: %q, trunk: main, depends_on: [first]}
-`, first, second))
-	checkout := filepath.Join(dest, "partial")
-	out, _, err := runCapturedOutput(t, "clone", root, checkout)
-	if err == nil || !strings.Contains(err.Error(), "repository second") || !strings.Contains(err.Error(), "ws bootstrap") || !strings.Contains(out, "first: cloned") {
-		t.Fatalf("partial clone: stdout=%q err=%v", out, err)
+  - {name: first, path: first, url: ../first, trunk: main}
+  - {name: second, path: second, url: ../second, trunk: main, depends_on: [first]}
+`)
+	checkout := filepath.Join(dir, "partial")
+	out, stderr, err := runCapturedOutput(t, "clone", root, checkout)
+	if err == nil || !strings.Contains(err.Error(), "repository second") || !strings.Contains(err.Error(), "ws bootstrap") {
+		t.Fatalf("partial clone error = %v", err)
 	}
-	cloneSource(t, sources, "second")
+	if !strings.Contains(out, "Cloned root:") || strings.Contains(out, "first: cloned") || !strings.Contains(stderr, "first: cloned") {
+		t.Fatalf("partial clone: stdout=%q stderr=%q", out, stderr)
+	}
+	second := cloneSource(t, dir, "second")
 	if _, _, err := runCapturedOutput(t, "bootstrap", "--workspace", checkout); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"first", "second"} {
 		extendedGit(t, filepath.Join(checkout, name), "rev-parse", "--verify", "HEAD")
+	}
+	extendedGit(t, filepath.Join(checkout, "first"), "remote", "set-url", "origin", second)
+	if _, _, err := runCapturedOutput(t, "bootstrap", "--workspace", checkout); err == nil || !strings.Contains(err.Error(), "origin mismatch") {
+		t.Fatalf("bootstrap accepted a different origin: %v", err)
 	}
 }
 

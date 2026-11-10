@@ -13,7 +13,7 @@ func TestCloneBasename(t *testing.T) {
 		{"ssh://host:2222/", "host"},
 		{"/", ""},
 	} {
-		if got := cloneBasename(tc.remote); got != tc.want {
+		if got := cloneBasename(tc.remote, false); got != tc.want {
 			t.Errorf("cloneBasename(%q) = %q, want %q", tc.remote, got, tc.want)
 		}
 	}

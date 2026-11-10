@@ -55,6 +55,11 @@ func run(args []string) error {
 	}
 	if command == "clone" {
 		result, cloneErr := ws.Clone(cwd, arg, opts.destination)
+		if !jsonOutput {
+			for _, r := range result.Repositories {
+				fmt.Fprintf(os.Stderr, "  %s: %s %s (trunk %s)\n", r.Name, r.Outcome, r.Path, r.Trunk)
+			}
+		}
 		if cloneErr != nil {
 			if !jsonOutput && result.Root != "" {
 				_ = output(result)

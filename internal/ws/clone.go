@@ -25,7 +25,7 @@ type CloneResult struct {
 func Clone(cwd, remote, destination string) (CloneResult, error) {
 	result := CloneResult{Repositories: []CloneRepository{}}
 	if destination == "" {
-		destination = cloneBasename(remote)
+		destination = cloneBasename(remote, isLocalBundle(cwd, remote))
 		if destination == "" || destination == "." || destination == ".." {
 			return result, fmt.Errorf("cannot infer clone destination; specify a destination")
 		}
@@ -81,7 +81,20 @@ func cloneRoot(cwd, remote, destination string) error {
 	return nil
 }
 
-func cloneBasename(remote string) string {
+func isLocalBundle(cwd, remote string) bool {
+	path := remote
+	if !filepath.IsAbs(path) {
+		path = cwd + string(filepath.Separator) + path
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	_, err = git(cwd, "bundle", "list-heads", "--", path)
+	return err == nil
+}
+
+func cloneBasename(remote string, bundle bool) string {
 	if _, rest, ok := strings.Cut(remote, "://"); ok {
 		remote = rest
 	}
@@ -99,7 +112,11 @@ func cloneBasename(remote string) string {
 		}
 	}
 	name := remote[strings.LastIndexAny(remote, "/:")+1:]
-	name = strings.TrimSuffix(name, ".git")
+	suffix := ".git"
+	if bundle {
+		suffix = ".bundle"
+	}
+	name = strings.TrimSuffix(name, suffix)
 	return strings.Join(strings.FieldsFunc(name, func(r rune) bool { return r <= ' ' }), " ")
 }
 
@@ -121,7 +138,7 @@ func bootstrap(root string, config Config, report func(CloneRepository)) error {
 
 func bootstrapRepository(root string, r Repository, path string) (string, error) {
 	if _, err := os.Lstat(path); err == nil {
-		return "validated", validateOrigin(path, r)
+		return "validated", validateOriginFrom(path, r, root)
 	} else if !os.IsNotExist(err) {
 		return "", err
 	}
