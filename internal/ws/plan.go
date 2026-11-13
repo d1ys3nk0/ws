@@ -34,6 +34,28 @@ func (e *Engine) enrichPlan(plan OperationPlan, m *Manifest) OperationPlan {
 	if command == "fetch" || command == "pull" || command == "push" || command == "bootstrap" {
 		plan.Unverified = append(plan.Unverified, "remote availability and current remote revisions")
 	}
+	if command == "push" {
+		repositories, err := e.pushRepositories()
+		if err != nil {
+			plan.Blockers = append(plan.Blockers, err.Error())
+			return plan
+		}
+		for _, repository := range repositories {
+			r := repository.repository
+			step := PlanStep{Phase: "push", Repository: r.Name, Target: repository.path, Effect: "publish local trunk " + r.Trunk, Checkpoint: "pending"}
+			_, destination, err := pushTarget(repository)
+			switch {
+			case err != nil:
+				plan.Blockers = append(plan.Blockers, fmt.Sprintf("repository %s push: %s", r.Name, err))
+				step.Checkpoint = "blocked"
+			case destination == "":
+				step.Effect = "skip: no origin remote"
+				step.Checkpoint = "skipped"
+			}
+			plan.Steps = append(plan.Steps, step)
+		}
+		return plan
+	}
 	var states []RepoState
 	if m != nil {
 		states = m.Repositories
@@ -44,7 +66,7 @@ func (e *Engine) enrichPlan(plan OperationPlan, m *Manifest) OperationPlan {
 			states = append(states, RepoState{Repository: r, Origin: path, Path: path})
 		}
 	} else {
-		canonical, err := e.canonicalRepositories(command == "push" || command == "pull")
+		canonical, err := e.canonicalRepositories(command == "pull")
 		if err != nil {
 			plan.Blockers = append(plan.Blockers, err.Error())
 			return plan
@@ -286,29 +308,20 @@ func (e *Engine) enrichPlan(plan OperationPlan, m *Manifest) OperationPlan {
 			if err := validateOrigin(r.Origin, r.Repository); err != nil {
 				plan.Blockers = append(plan.Blockers, err.Error())
 			}
-			if command == "pull" || command == "push" {
+			if command == "pull" {
 				if _, err := localBaseline(&r); err != nil {
 					plan.Blockers = append(plan.Blockers, err.Error())
 				}
 			}
-			effect := map[string]string{"bootstrap": "validate existing origin", "fetch": "fetch remote trunk into cached origin/" + r.Repository.Trunk, "pull": "fetch and rebase local trunk " + r.Repository.Trunk, "push": "fetch, validate, and publish trunk " + r.Repository.Trunk}[command]
-			if command == "push" {
-				if _, err := pushDestination(r.Origin); err != nil {
-					plan.Blockers = append(plan.Blockers, err.Error())
-				}
-				effect = "fetch remote trunk and validate publication"
-			}
+			effect := map[string]string{"bootstrap": "validate existing origin", "fetch": "fetch remote trunk into cached origin/" + r.Repository.Trunk}[command]
 			if command == "pull" {
 				effect = "fetch remote trunk and validate rebase"
 			}
 			add(r, command, r.Origin, effect, "pending")
 		}
-		if command == "push" || command == "pull" {
+		if command == "pull" {
 			for _, r := range states {
-				effect := "publish local trunk " + r.Repository.Trunk
-				if command == "pull" {
-					effect = "rebase local trunk " + r.Repository.Trunk + " on fetched remote trunk"
-				}
+				effect := "rebase local trunk " + r.Repository.Trunk + " on fetched remote trunk"
 				add(r, command, r.Origin, effect, "pending")
 			}
 		}

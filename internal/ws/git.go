@@ -113,6 +113,13 @@ func validateOrigin(path string, r Repository) error {
 }
 
 func validateOriginFrom(path string, r Repository, sourceDir string) error {
+	if err := validateCheckoutRoot(path, r.Name); err != nil {
+		return err
+	}
+	return validateOriginURL(path, r, sourceDir)
+}
+
+func validateCheckoutRoot(path, name string) error {
 	top, e := git(path, "rev-parse", "--show-toplevel")
 	if e != nil {
 		return e
@@ -122,8 +129,12 @@ func validateOriginFrom(path string, r Repository, sourceDir string) error {
 		return e
 	}
 	if top != actual {
-		return fmt.Errorf("repository %s: path is not a Git checkout root", r.Name)
+		return fmt.Errorf("repository %s: path is not a Git checkout root", name)
 	}
+	return nil
+}
+
+func validateOriginURL(path string, r Repository, sourceDir string) error {
 	u, e := git(path, "remote", "get-url", "origin")
 	if e != nil {
 		return e

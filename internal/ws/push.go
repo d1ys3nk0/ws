@@ -3,146 +3,106 @@ package ws
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
-type pushRepository struct {
-	repository  Repository
-	path        string
-	local       string
-	destination string
-}
-
-func (e *Engine) pushRepositories() ([]pushRepository, error) {
+func (e *Engine) pushRepositories() ([]canonicalRepository, error) {
 	ordered, err := e.Config.Order()
 	if err != nil {
 		return nil, err
 	}
-	repositories := make([]pushRepository, 0, len(ordered)+1)
+	repositories := make([]canonicalRepository, 0, len(ordered)+1)
 	for _, repository := range ordered {
-		repositories = append(repositories, pushRepository{repository: repository, path: filepath.Join(e.Root, repository.Path)})
+		repositories = append(repositories, canonicalRepository{repository: repository, path: filepath.Join(e.Root, repository.Path)})
 	}
-	rootURL, err := git(e.Root, "remote", "get-url", "origin")
-	if err != nil {
-		return nil, fmt.Errorf("repository root: resolve origin: %w", err)
-	}
-	repositories = append(repositories, pushRepository{
-		repository: Repository{Name: "root", URL: rootURL, Trunk: e.Config.Root.Trunk},
+	return append(repositories, canonicalRepository{
+		repository: Repository{Name: "root", Trunk: e.Config.Root.Trunk},
 		path:       e.Root,
-	})
-	return repositories, nil
+	}), nil
 }
 
-func (e *Engine) preflightPush(repository *pushRepository) error {
+// pushTarget resolves the current local trunk and its destination.
+// An empty destination with no error means the checkout has no origin.
+func pushTarget(repository canonicalRepository) (revision, destination string, err error) {
 	r := repository.repository
-	if err := validateOrigin(repository.path, r); err != nil {
-		return fmt.Errorf("repository %s push preflight: %w", r.Name, err)
+	path := repository.path
+	if err := validateCheckoutRoot(path, r.Name); err != nil {
+		return "", "", err
 	}
-	if err := e.reconcileSync(r, repository.path); err != nil {
-		return fmt.Errorf("repository %s push preflight: %w", r.Name, err)
-	}
-	if err := clean(repository.path); err != nil {
-		return fmt.Errorf("repository %s push preflight: %w", r.Name, err)
-	}
-	currentBranch, err := branch(repository.path)
+	remotes, err := git(path, "remote")
 	if err != nil {
-		return fmt.Errorf("repository %s push preflight: configured trunk %s is not checked out: %w", r.Name, r.Trunk, err)
+		return "", "", err
 	}
-	if currentBranch != r.Trunk {
-		return fmt.Errorf("repository %s push preflight: checked out branch is %s, expected configured trunk %s", r.Name, currentBranch, r.Trunk)
+	if !slices.Contains(strings.Split(remotes, "\n"), "origin") {
+		return "", "", nil
 	}
-	local, err := git(repository.path, "rev-parse", "refs/heads/"+r.Trunk)
+	if r.Name != "root" {
+		if err := validateOriginURL(path, r, ""); err != nil {
+			return "", "", err
+		}
+	}
+	destination, err = pushDestination(path)
 	if err != nil {
-		return fmt.Errorf("repository %s push preflight: resolve local trunk %s: %w", r.Name, r.Trunk, err)
+		return "", "", err
 	}
-	current, err := head(repository.path)
-	if err != nil {
-		return fmt.Errorf("repository %s push preflight: resolve HEAD: %w", r.Name, err)
-	}
-	if current != local {
-		return fmt.Errorf("repository %s push preflight: HEAD does not match local trunk %s", r.Name, r.Trunk)
-	}
-	destination, err := pushDestination(repository.path)
-	if err != nil {
-		return err
-	}
-	repository.destination = destination
-	if _, err = git(repository.path, "fetch", "--no-tags", "--", destination, "refs/heads/"+r.Trunk); err != nil {
-		return fmt.Errorf("repository %s push preflight: fetch remote trunk %s: %w", r.Name, r.Trunk, err)
-	}
-	remote, err := git(repository.path, "rev-parse", "FETCH_HEAD")
-	if err != nil {
-		return fmt.Errorf("repository %s push preflight: resolve fetched remote trunk %s: %w", r.Name, r.Trunk, err)
-	}
-	if !ancestor(repository.path, remote, local) {
-		return fmt.Errorf("repository %s push preflight: remote trunk %s is not an ancestor of the local trunk; local trunk is behind or divergent", r.Name, r.Trunk)
-	}
-	repository.local = local
-	e.logOperationOutcome("push", r.Name, repository.path, "", "preflight complete", LogSuccess, " for trunk %s at %s", r.Trunk, abbreviateRevision(local))
-	return nil
+	revision, err = git(path, "rev-parse", "--verify", "refs/heads/"+r.Trunk)
+	return revision, destination, err
 }
 
-// Push validates every canonical checkout before publishing any repository.
-// Children are published in dependency order and the workspace root last.
+// Push publishes child trunks in dependency order, then the workspace root.
+// Each repository is resolved and pushed before inspecting the next checkout.
 func (e *Engine) Push() error {
 	repositories, err := e.pushRepositories()
 	if err != nil {
 		return err
 	}
-	publicationError := func(index int, published bool, err error) error {
-		result := &PublicationError{Err: failure("preflight", repositories[index].repository.Name, err), Blocked: repositories[index].repository.Name, Completed: []string{}, Pending: []string{}}
-		for i, r := range repositories {
-			if i == index {
-				continue
-			}
-			if published && i < index {
-				result.Completed = append(result.Completed, r.repository.Name)
-			} else {
-				result.Pending = append(result.Pending, r.repository.Name)
-			}
-		}
-		return result
-	}
-	for i := range repositories {
-		if err := e.preflightPush(&repositories[i]); err != nil {
-			return publicationError(i, false, err)
-		}
-	}
+	completed := []string{}
 	for index, repository := range repositories {
 		r := repository.repository
-		if err := validateOrigin(repository.path, r); err != nil {
-			return publicationError(index, true, err)
-		}
-		current, err := localBaseline(&RepoState{Repository: r, Origin: repository.path})
+		skipped, err := e.pushRepository(repository)
 		if err != nil {
-			return publicationError(index, true, err)
+			pending := make([]string, 0, len(repositories)-index-1)
+			for _, next := range repositories[index+1:] {
+				pending = append(pending, next.repository.Name)
+			}
+			return &PublicationError{
+				Err:       failure("external_command", r.Name, fmt.Errorf("repository %s push: %w", r.Name, err)),
+				Completed: completed,
+				Blocked:   r.Name,
+				Pending:   pending,
+			}
 		}
-		if current != repository.local {
-			return publicationError(index, true, fmt.Errorf("repository %s: local trunk changed after publication preflight", r.Name))
-		}
-		destination, err := pushDestination(repository.path)
-		if err != nil {
-			return publicationError(index, true, err)
-		}
-		if destination != repository.destination {
-			return publicationError(index, true, fmt.Errorf("repository %s: publication destination changed after preflight", r.Name))
-		}
-		refspec := repository.local + ":refs/heads/" + r.Trunk
-		changed, err := pushTrunk(repository.path, repository.destination, refspec)
-		if err != nil {
-			return publicationError(index, true, failure("external_command", r.Name, fmt.Errorf("repository %s push: %w; earlier repositories may already be published, inspect remotes and retry", r.Name, err)))
-		}
-		remoteTrackingRef := "refs/remotes/origin/" + r.Trunk
-		if _, err := git(repository.path, "update-ref", remoteTrackingRef, repository.local); err != nil {
-			return publicationError(index, true, fmt.Errorf("repository %s: trunk was published but cached origin/%s could not be updated: %w", r.Name, r.Trunk, err))
-		}
-		if changed {
-			e.logOperationOutcome("push", r.Name, repository.path, "", "pushed", LogChanged, " trunk %s at %s", r.Trunk, abbreviateRevision(repository.local))
-		} else {
-			e.logOperationOutcome("push", r.Name, repository.path, fmt.Sprintf("trunk %s ", r.Trunk), "unchanged", LogSuccess, " at %s", abbreviateRevision(repository.local))
+		if !skipped {
+			completed = append(completed, r.Name)
 		}
 	}
 	return nil
+}
+
+func (e *Engine) pushRepository(repository canonicalRepository) (skipped bool, err error) {
+	r := repository.repository
+	local, destination, err := pushTarget(repository)
+	if err != nil {
+		return false, err
+	}
+	if destination == "" {
+		e.logOperationOutcome("push", r.Name, repository.path, "", "skipped", LogWarning, ": no origin remote")
+		return true, nil
+	}
+	changed, err := pushTrunk(repository.path, destination, local+":refs/heads/"+r.Trunk)
+	if err != nil {
+		return false, err
+	}
+	if _, err := git(repository.path, "update-ref", "refs/remotes/origin/"+r.Trunk, local); err != nil {
+		return false, fmt.Errorf("trunk was published but cached origin/%s could not be updated: %w", r.Trunk, err)
+	}
+	if changed {
+		e.logOperationOutcome("push", r.Name, repository.path, "", "pushed", LogChanged, " trunk %s at %s", r.Trunk, abbreviateRevision(local))
+	} else {
+		e.logOperationOutcome("push", r.Name, repository.path, fmt.Sprintf("trunk %s ", r.Trunk), "unchanged", LogSuccess, " at %s", abbreviateRevision(local))
+	}
+	return false, nil
 }
 
 func pushTrunk(path, destination, refspec string) (bool, error) {

@@ -505,10 +505,8 @@ func TestCLIPushReportsResultAndProgress(t *testing.T) {
 	if strings.Contains(stdout, "\x1b[") || strings.Contains(stderr, "\x1b[") {
 		t.Fatalf("JSON mode emitted ANSI: stdout %q, stderr %q", stdout, stderr)
 	}
-	for _, want := range []string{"[push/root @ " + root + "] preflight complete for trunk main", "[push/root @ " + root + "] pushed trunk main"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("push progress missing %q:\n%s", want, stderr)
-		}
+	if !strings.Contains(stderr, "[push/root @ "+root+"] pushed trunk main") || strings.Contains(stderr, "preflight") {
+		t.Fatalf("unexpected push progress:\n%s", stderr)
 	}
 	human, err := runOutput(t, "push", "--workspace", root)
 	if err != nil {
@@ -516,6 +514,21 @@ func TestCLIPushReportsResultAndProgress(t *testing.T) {
 	}
 	if human != "Push complete.\nWorkspace: "+root+"\n" {
 		t.Fatalf("unexpected human push result: %q", human)
+	}
+}
+
+func TestCLIPushSucceedsWhenAllRepositoriesSkip(t *testing.T) {
+	root := cliCleanWorkspace(t)
+	stdout, stderr, err := runCapturedOutput(t, "push", "--json", "--workspace", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result commandResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil || result.Command != "push" || !result.Complete {
+		t.Fatalf("unexpected push result %q: %v", stdout, err)
+	}
+	if !strings.Contains(stderr, "[push/root @ "+root+"] skipped: no origin remote") {
+		t.Fatalf("missing skip notice on stderr: %q", stderr)
 	}
 }
 

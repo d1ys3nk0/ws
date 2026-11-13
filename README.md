@@ -102,6 +102,8 @@ Hooks must be idempotent, leave their checkout clean when successful, and own st
 
 ## Safety and development
 
+`ws push` publishes each configured child trunk in dependency order, then the root trunk. It reports and skips checkouts without an `origin`. If a push fails or a child's origin differs from `workspace.yml`, earlier successful pushes stay published. `ws push --dry-run` previews the order and skips using local information.
+
 Workspace Steward records checkout custody and branch custody independently. Audit and prune authorize registered external roots and externally owned branches but never offer to delete them. Destructive cleanup verifies ownership, path, branch, revision, worktree cleanliness, and nested repositories before mutation.
 
 Human results use stdout and progress/errors use stderr. `--json` emits stable command-specific objects. Use `--dry-run` before destructive or remote operations.
