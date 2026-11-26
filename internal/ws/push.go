@@ -7,6 +7,21 @@ import (
 	"strings"
 )
 
+type PushOutcome string
+
+const (
+	PushPushed    PushOutcome = "pushed"
+	PushUnchanged PushOutcome = "unchanged"
+	PushSkipped   PushOutcome = "skipped"
+)
+
+type PushRepositoryResult struct {
+	Name     string
+	Trunk    string
+	Revision string
+	Outcome  PushOutcome
+}
+
 func (e *Engine) pushRepositories() ([]canonicalRepository, error) {
 	ordered, err := e.Config.Order()
 	if err != nil {
@@ -51,58 +66,65 @@ func pushTarget(repository canonicalRepository) (revision, destination string, e
 }
 
 // Push publishes child trunks in dependency order, then the workspace root.
-// Each repository is resolved and pushed before inspecting the next checkout.
-func (e *Engine) Push() error {
+// It returns the completed and skipped results even if a later push fails.
+func (e *Engine) Push() ([]PushRepositoryResult, error) {
 	repositories, err := e.pushRepositories()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	results := make([]PushRepositoryResult, 0, len(repositories))
 	completed := []string{}
 	for index, repository := range repositories {
 		r := repository.repository
-		skipped, err := e.pushRepository(repository)
+		result, err := e.pushRepository(repository)
 		if err != nil {
 			pending := make([]string, 0, len(repositories)-index-1)
 			for _, next := range repositories[index+1:] {
 				pending = append(pending, next.repository.Name)
 			}
-			return &PublicationError{
+			return results, &PublicationError{
 				Err:       failure("external_command", r.Name, fmt.Errorf("repository %s push: %w", r.Name, err)),
 				Completed: completed,
 				Blocked:   r.Name,
 				Pending:   pending,
 			}
 		}
-		if !skipped {
+		results = append(results, result)
+		if result.Outcome != PushSkipped {
 			completed = append(completed, r.Name)
 		}
 	}
-	return nil
+	return results, nil
 }
 
-func (e *Engine) pushRepository(repository canonicalRepository) (skipped bool, err error) {
+func (e *Engine) pushRepository(repository canonicalRepository) (PushRepositoryResult, error) {
 	r := repository.repository
+	result := PushRepositoryResult{Name: r.Name, Trunk: r.Trunk}
 	local, destination, err := pushTarget(repository)
 	if err != nil {
-		return false, err
+		return result, err
 	}
 	if destination == "" {
+		result.Outcome = PushSkipped
 		e.logOperationOutcome("push", r.Name, repository.path, "", "skipped", LogWarning, ": no origin remote")
-		return true, nil
+		return result, nil
 	}
 	changed, err := pushTrunk(repository.path, destination, local+":refs/heads/"+r.Trunk)
 	if err != nil {
-		return false, err
+		return result, err
 	}
 	if _, err := git(repository.path, "update-ref", "refs/remotes/origin/"+r.Trunk, local); err != nil {
-		return false, fmt.Errorf("trunk was published but cached origin/%s could not be updated: %w", r.Trunk, err)
+		return result, fmt.Errorf("trunk was published but cached origin/%s could not be updated: %w", r.Trunk, err)
 	}
+	result.Revision = abbreviateRevision(local)
 	if changed {
-		e.logOperationOutcome("push", r.Name, repository.path, "", "pushed", LogChanged, " trunk %s at %s", r.Trunk, abbreviateRevision(local))
+		result.Outcome = PushPushed
+		e.logOperationOutcome("push", r.Name, repository.path, "", string(result.Outcome), LogChanged, " trunk %s at %s", r.Trunk, result.Revision)
 	} else {
-		e.logOperationOutcome("push", r.Name, repository.path, fmt.Sprintf("trunk %s ", r.Trunk), "unchanged", LogSuccess, " at %s", abbreviateRevision(local))
+		result.Outcome = PushUnchanged
+		e.logOperationOutcome("push", r.Name, repository.path, fmt.Sprintf("trunk %s ", r.Trunk), string(result.Outcome), LogSuccess, " at %s", result.Revision)
 	}
-	return false, nil
+	return result, nil
 }
 
 func pushTrunk(path, destination, refspec string) (bool, error) {

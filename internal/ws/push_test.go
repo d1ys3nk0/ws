@@ -40,7 +40,7 @@ func TestPushSkipsMissingOriginAndContinues(t *testing.T) {
 	mustGit(t, e.Root, "remote", "remove", "origin")
 	var output bytes.Buffer
 	e.Out = &output
-	if err := e.Push(); err != nil {
+	if _, err := e.Push(); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"repo0", "repo2"} {
@@ -74,7 +74,7 @@ func TestPushPublishesDependenciesBeforeRoot(t *testing.T) {
 
 	var output bytes.Buffer
 	e.Out = &output
-	if err := e.Push(); err != nil {
+	if _, err := e.Push(); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{filepath.Join(e.Root, "repo0"), filepath.Join(e.Root, "repo1"), e.Root} {
@@ -115,7 +115,7 @@ func TestPushCreatesRemoteTrunkFromDirtyCheckoutOnAnotherBranch(t *testing.T) {
 	commitFile(t, path, "topic.txt", "topic\n")
 	put(t, filepath.Join(path, "dirty.txt"), "dirty\n")
 
-	if err := e.Push(); err != nil {
+	if _, err := e.Push(); err != nil {
 		t.Fatal(err)
 	}
 	if got := mustGit(t, remote, "rev-parse", "refs/heads/main"); got != trunk {
@@ -176,7 +176,7 @@ func TestPushStopsAtInvalidCheckoutOrDestination(t *testing.T) {
 			rootRemote := remoteURL(t, e.Root)
 			rootBefore := remoteBranches(t, rootRemote)
 
-			err := e.Push()
+			_, err := e.Push()
 			var result *PublicationError
 			if !errors.As(err, &result) || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("expected push failure containing %q, got %v", tc.want, err)
@@ -211,7 +211,7 @@ func TestPushIsIdempotentAndRetryableAfterPartialPublication(t *testing.T) {
 	if err := os.Chmod(hook, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Push(); err == nil {
+	if _, err := e.Push(); err == nil {
 		t.Fatal("root remote rejection did not fail push")
 	}
 	if got, want := mustGit(t, childRemote, "rev-parse", "refs/heads/main"), mustGit(t, child, "rev-parse", "HEAD"); got != want {
@@ -223,10 +223,10 @@ func TestPushIsIdempotentAndRetryableAfterPartialPublication(t *testing.T) {
 	if err := os.Remove(hook); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Push(); err != nil {
+	if _, err := e.Push(); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	if err := e.Push(); err != nil {
+	if _, err := e.Push(); err != nil {
 		t.Fatalf("already-current retry: %v", err)
 	}
 	if got, want := mustGit(t, rootRemote, "rev-parse", "refs/heads/main"), mustGit(t, e.Root, "rev-parse", "HEAD"); got != want {
@@ -236,13 +236,13 @@ func TestPushIsIdempotentAndRetryableAfterPartialPublication(t *testing.T) {
 
 func TestPushReportsAlreadyCurrentTrunksAsUnchanged(t *testing.T) {
 	e := fixture(t, 1)
-	if err := e.Push(); err != nil {
+	if _, err := e.Push(); err != nil {
 		t.Fatal(err)
 	}
 
 	var output bytes.Buffer
 	e.Out = &output
-	if err := e.Push(); err != nil {
+	if _, err := e.Push(); err != nil {
 		t.Fatal(err)
 	}
 	for _, repository := range []string{"repo0", "root"} {

@@ -249,6 +249,7 @@ func run(args []string) error {
 			}
 			return nil
 		}
+		var pushed []ws.PushRepositoryResult
 		err = engine.Mutate(func() error {
 			if command == "refresh" || command == "merge" || command == "drop" {
 				m, err = engine.Select(selector, workspace)
@@ -264,7 +265,11 @@ func run(args []string) error {
 			case "pull":
 				return engine.Pull()
 			case "push":
-				return engine.Push()
+				if !jsonOutput {
+					engine.Out = nil
+				}
+				pushed, err = engine.Push()
+				return err
 			case "create":
 				if opts.existingRoot != "" {
 					m, err = engine.CreateExisting(arg, opts.existingRoot, only, except)
@@ -296,7 +301,13 @@ func run(args []string) error {
 			}
 		}
 		if err != nil {
+			if command == "push" && !jsonOutput && len(pushed) > 0 {
+				_ = renderPushTree(os.Stdout, engine.Root, pushed, false, stdoutStyle)
+			}
 			return operationFailure(command, m, err)
+		}
+		if command == "push" && !jsonOutput {
+			return renderPushTree(os.Stdout, engine.Root, pushed, true, stdoutStyle)
 		}
 		switch command {
 		case "create":

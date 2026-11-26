@@ -508,12 +508,61 @@ func TestCLIPushReportsResultAndProgress(t *testing.T) {
 	if !strings.Contains(stderr, "[push/root @ "+root+"] pushed trunk main") || strings.Contains(stderr, "preflight") {
 		t.Fatalf("unexpected push progress:\n%s", stderr)
 	}
-	human, err := runOutput(t, "push", "--workspace", root)
-	if err != nil {
+}
+
+func TestCLIPushRendersWorkspaceTree(t *testing.T) {
+	root := cliCleanWorkspace(t)
+	remote := filepath.Join(filepath.Dir(root), "workspace.git")
+	api := filepath.Join(root, "repos", "api")
+	offline := filepath.Join(root, "repos", "offline")
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "--bare", "--initial-branch=main", remote)
+	git("-C", root, "remote", "add", "origin", remote)
+	git("-C", root, "push", "origin", "main", "main:stable")
+	git("clone", "--branch", "stable", remote, api)
+	git("init", "--initial-branch=main", offline)
+	config := fmt.Sprintf("version: 1\nroot:\n  trunk: main\nchildren:\n- name: api\n  path: repos/api\n  url: %s\n  trunk: stable\n- name: offline\n  path: repos/offline\n  url: %s\n  trunk: main\n", remote, remote)
+	if err := os.WriteFile(filepath.Join(root, "workspace.yml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if human != "Push complete.\nWorkspace: "+root+"\n" {
-		t.Fatalf("unexpected human push result: %q", human)
+	git("-C", root, "commit", "-am", "chore: add workspace children")
+	rootRevision := git("-C", root, "rev-parse", "main")[:12]
+	apiRevision := git("-C", api, "rev-parse", "stable")[:12]
+
+	stdout, stderr, err := runCapturedOutput(t, "push", "--workspace", root)
+	if err != nil || stderr != "" {
+		t.Fatalf("human push: stdout %q, stderr %q, error %v", stdout, stderr, err)
+	}
+	want := []string{
+		"workspace · root (main) ↑ pushed " + rootRevision,
+		"├─ api (stable) = unchanged " + apiRevision,
+		"└─ offline – skipped no origin remote",
+		"",
+		"✓ Push complete · 1 pushed · 1 unchanged · 1 skipped",
+	}
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	if len(lines) != len(want) {
+		t.Fatalf("unexpected push output:\n%s", stdout)
+	}
+	for i, line := range lines {
+		if strings.Join(strings.Fields(line), " ") != want[i] {
+			t.Fatalf("line %d = %q, want %q", i+1, line, want[i])
+		}
+	}
+
+	git("-C", root, "remote", "set-url", "origin", filepath.Join(filepath.Dir(root), "missing.git"))
+	stdout, stderr, err = runCapturedOutput(t, "push", "--workspace", root)
+	if err == nil || !strings.Contains(err.Error(), "repository root push") ||
+		!strings.Contains(stdout, "├─ api (stable)") || !strings.Contains(stdout, "no origin remote") ||
+		strings.Contains(stdout, "Push complete") || stderr != "" {
+		t.Fatalf("partial push: stdout %q, stderr %q, error %v", stdout, stderr, err)
 	}
 }
 

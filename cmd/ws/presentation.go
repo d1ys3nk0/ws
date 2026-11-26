@@ -455,6 +455,54 @@ func renderHuman(out io.Writer, result any) error {
 	return renderHumanStyled(out, result, humanStyle{})
 }
 
+func renderPushTree(out io.Writer, workspace string, repositories []ws.PushRepositoryResult, complete bool, style humanStyle) error {
+	root := style.paint(semanticCyanBold, filepath.Base(workspace)) + " · root"
+	rootRow := []string{root}
+	children := repositories
+	rootTrunk := ""
+	if len(repositories) > 0 && repositories[len(repositories)-1].Name == "root" {
+		repository := repositories[len(repositories)-1]
+		rootTrunk = repository.Trunk
+		rootRow = pushTreeRow(root, repository, true, style)
+		children = repositories[:len(repositories)-1]
+	}
+	rows := [][]string{rootRow}
+	for i, repository := range children {
+		branch := "├─ "
+		if i == len(children)-1 {
+			branch = "└─ "
+		}
+		rows = append(rows, pushTreeRow(branch+repository.Name, repository, repository.Trunk != rootTrunk, style))
+	}
+	if err := renderTable(out, rows); err != nil || !complete {
+		return err
+	}
+	counts := make(map[ws.PushOutcome]int)
+	for _, repository := range repositories {
+		counts[repository.Outcome]++
+	}
+	summary := fmt.Sprintf("%d pushed · %d unchanged", counts[ws.PushPushed], counts[ws.PushUnchanged])
+	if skipped := counts[ws.PushSkipped]; skipped > 0 {
+		summary += fmt.Sprintf(" · %d skipped", skipped)
+	}
+	_, err := fmt.Fprintf(out, "\n%s · %s\n", style.paint(semanticGreen, "✓ Push complete"), summary)
+	return err
+}
+
+func pushTreeRow(label string, repository ws.PushRepositoryResult, showTrunk bool, style humanStyle) []string {
+	if showTrunk {
+		label += " (" + repository.Trunk + ")"
+	}
+	switch repository.Outcome {
+	case ws.PushSkipped:
+		return []string{label, style.paint(semanticYellow, "– skipped"), "no origin remote"}
+	case ws.PushPushed:
+		return []string{label, style.paint(semanticGreen, "↑ pushed"), repository.Revision}
+	default:
+		return []string{label, "= unchanged", repository.Revision}
+	}
+}
+
 func renderHumanStyled(out io.Writer, result any, style humanStyle) error {
 	switch value := result.(type) {
 	case publicationResult:
