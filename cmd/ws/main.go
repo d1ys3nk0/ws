@@ -249,6 +249,7 @@ func run(args []string) error {
 			}
 			return nil
 		}
+		var pulled []ws.PullRepositoryResult
 		var pushed []ws.PushRepositoryResult
 		err = engine.Mutate(func() error {
 			if command == "refresh" || command == "merge" || command == "drop" {
@@ -263,7 +264,8 @@ func run(args []string) error {
 			case "fetch":
 				return engine.Fetch()
 			case "pull":
-				return engine.Pull()
+				pulled, err = engine.Pull()
+				return err
 			case "push":
 				if !jsonOutput {
 					engine.Out = nil
@@ -299,6 +301,19 @@ func run(args []string) error {
 					}
 				}
 			}
+		}
+		if command == "pull" && len(pulled) > 0 {
+			report := pullResult{
+				commandResult: commandResult{Command: command, Complete: err == nil, Workspace: engine.Root},
+				Repositories:  pulled,
+			}
+			if outputErr := output(report); outputErr != nil {
+				return outputErr
+			}
+			if !report.Complete {
+				return incompleteResultError{command: command}
+			}
+			return nil
 		}
 		if err != nil {
 			if command == "push" && !jsonOutput && len(pushed) > 0 {

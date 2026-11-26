@@ -18,7 +18,7 @@ children:
     depends_on: []
 ```
 
-Repository names are stable configuration identities. Paths are relative to the root. URLs and trunks must match existing canonical child checkouts. `ws bootstrap` clones missing children; it never replaces an existing path.
+Repository names are stable configuration identities. Paths are relative to the root. URLs and trunks must match existing canonical child checkouts. `ws pull` and `ws bootstrap` clone missing children at their configured trunks and preserve existing paths.
 
 By default creation selects the root and every child. `--only api,web` selects exactly those children and `--except devtools` selects all other children. The root is always selected. Dependencies must be present in the selection.
 

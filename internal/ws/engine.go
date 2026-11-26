@@ -274,7 +274,7 @@ func (e *Engine) backup(operation, path, label string, m *Manifest) error {
 	return nil
 }
 func (e *Engine) Fetch() error {
-	repositories, err := e.canonicalRepositories(false)
+	repositories, err := e.canonicalRepositories()
 	if err != nil {
 		return err
 	}

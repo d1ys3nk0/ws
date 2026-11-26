@@ -17,12 +17,7 @@ Release binaries support macOS and Linux on amd64 and arm64. The installer resol
 
 Clone an existing workspace with `ws clone <remote> [destination]`. Workspace Steward checks out the root's default branch and clones the children declared in its `workspace.yml`. If the file is missing, the command warns and keeps the root checkout. If a child clone fails, fix the reported problem and run `ws bootstrap` in the root to resume.
 
-To set up a workspace in an existing checkout, initialize the root and declare children in `workspace.yml`.
-
-```sh
-ws init
-ws bootstrap
-```
+If you cloned the root with Git and it already has a `workspace.yml`, run `ws pull` from that checkout to clone missing children and update existing checkouts. For a new workspace, run `ws init`, declare the children in `workspace.yml`, and run `ws bootstrap` to populate missing checkouts while keeping existing revisions.
 
 See [configuration](docs/configuration.md) for the complete schema and hook contract.
 
@@ -101,6 +96,8 @@ Lifecycle hooks receive workspace-oriented context including `WS_WORKSPACE_ID`, 
 Hooks must be idempotent, leave their checkout clean when successful, and own staging and committing their outputs. See [configuration](docs/configuration.md) and [recovery](docs/recovery.md).
 
 ## Safety and development
+
+`ws pull` processes canonical child repositories in dependency order, then updates the canonical root. It clones missing children at their configured trunks and fetches and rebases existing checkouts. The workspace tree shows the outcome for every repository. If any fail, the command exits with status 1 after trying the others. Fix the reported problems and rerun `ws pull`. Successful clones and updates stay in place, and interrupted rebases are left for you to resolve or abort. `ws pull --dry-run` previews the local checks and planned operations.
 
 `ws push` publishes each configured child trunk in dependency order, then the root trunk. The human result shows the root above its children, with the outcome and commit for each published trunk. It reports and skips checkouts without an `origin`. If a push fails or a child's origin differs from `workspace.yml`, earlier successful pushes stay published. `ws push --dry-run` previews the order and skips using local information.
 

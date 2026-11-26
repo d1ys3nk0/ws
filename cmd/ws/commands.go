@@ -30,7 +30,7 @@ var commands = []commandDefinition{
 	{"merge", "[workspace]", "Integrate a managed workspace, remove worktrees, and finalize.", []string{"keep", "dry-run", "message", "ignore-hook-failures", "skip-hooks", "skip-hook-git-hooks", "no-cd"}, 0, 1},
 	{"drop", "[workspace]", "Remove owned managed workspace resources.", []string{"dry-run", "force", "f", "no-cd"}, 0, 1},
 	{"fetch", "", "Update cached remote trunk refs.", []string{"dry-run"}, 0, 0},
-	{"pull", "", "Fetch and rebase canonical local trunks.", []string{"dry-run"}, 0, 0},
+	{"pull", "", "Clone missing children and update canonical trunks.", []string{"dry-run"}, 0, 0},
 	{"push", "", "Publish child trunks, then the root trunk.", []string{"dry-run"}, 0, 0},
 	{"clone", "<remote> [destination]", "Clone a root and its configured child repositories.", nil, 1, 2},
 	{"init", "", "Create minimal configuration in a canonical Git checkout.", []string{"trunk", "dry-run"}, 0, 0},

@@ -25,6 +25,11 @@ type commandResult struct {
 	Workspace string `json:"workspace"`
 }
 
+type pullResult struct {
+	commandResult
+	Repositories []ws.PullRepositoryResult `json:"repositories"`
+}
+
 type treeRepositoryResult struct {
 	Name           string  `json:"name"`
 	Path           string  `json:"path"`
@@ -466,15 +471,11 @@ func renderPushTree(out io.Writer, workspace string, repositories []ws.PushRepos
 		rootRow = pushTreeRow(root, repository, true, style)
 		children = repositories[:len(repositories)-1]
 	}
-	rows := [][]string{rootRow}
-	for i, repository := range children {
-		branch := "├─ "
-		if i == len(children)-1 {
-			branch = "└─ "
-		}
-		rows = append(rows, pushTreeRow(branch+repository.Name, repository, repository.Trunk != rootTrunk, style))
+	childRows := make([][]string, 0, len(children))
+	for _, repository := range children {
+		childRows = append(childRows, pushTreeRow(repository.Name, repository, repository.Trunk != rootTrunk, style))
 	}
-	if err := renderTable(out, rows); err != nil || !complete {
+	if err := renderWorkspaceTree(out, rootRow, childRows); err != nil || !complete {
 		return err
 	}
 	counts := make(map[ws.PushOutcome]int)
@@ -503,8 +504,65 @@ func pushTreeRow(label string, repository ws.PushRepositoryResult, showTrunk boo
 	}
 }
 
+func renderWorkspaceTree(out io.Writer, root []string, children [][]string) error {
+	rows := [][]string{root}
+	for i, child := range children {
+		branch := "├─ "
+		if i == len(children)-1 {
+			branch = "└─ "
+		}
+		child[0] = branch + child[0]
+		rows = append(rows, child)
+	}
+	return renderTable(out, rows)
+}
+
+func renderPullTree(out io.Writer, result pullResult, style humanStyle) error {
+	root := result.Repositories[len(result.Repositories)-1]
+	rootLabel := style.paint(semanticCyanBold, filepath.Base(result.Workspace)) + " · root"
+	rootRow := pullTreeRow(rootLabel, root, true, style)
+	children := make([][]string, 0, len(result.Repositories)-1)
+	counts := make(map[ws.PullOutcome]int)
+	for _, repository := range result.Repositories {
+		counts[repository.Outcome]++
+		if repository.Name != "root" {
+			children = append(children, pullTreeRow(repository.Name, repository, repository.Trunk != root.Trunk, style))
+		}
+	}
+	if err := renderWorkspaceTree(out, rootRow, children); err != nil {
+		return err
+	}
+	summary := fmt.Sprintf("%d cloned · %d updated · %d unchanged", counts[ws.PullCloned], counts[ws.PullUpdated], counts[ws.PullUnchanged])
+	status := style.paint(semanticGreen, "✓ Pull complete")
+	if failed := counts[ws.PullFailed]; failed > 0 {
+		status = style.paint(semanticRed, "✗ Pull incomplete")
+		summary += fmt.Sprintf(" · %d failed", failed)
+	}
+	_, err := fmt.Fprintf(out, "\n%s · %s\n", status, summary)
+	return err
+}
+
+func pullTreeRow(label string, repository ws.PullRepositoryResult, showTrunk bool, style humanStyle) []string {
+	if showTrunk {
+		label += " (" + repository.Trunk + ")"
+	}
+	revision := abbreviated(repository.After)
+	switch repository.Outcome {
+	case ws.PullCloned:
+		return []string{label, style.paint(semanticGreen, "+ cloned"), revision}
+	case ws.PullUpdated:
+		return []string{label, style.paint(semanticGreen, "↓ updated"), abbreviated(repository.Before) + " → " + revision}
+	case ws.PullFailed:
+		return []string{label, style.paint(semanticRed, "✗ failed"), strings.Join(strings.Fields(repository.Error), " ")}
+	default:
+		return []string{label, "= unchanged", revision}
+	}
+}
+
 func renderHumanStyled(out io.Writer, result any, style humanStyle) error {
 	switch value := result.(type) {
+	case pullResult:
+		return renderPullTree(out, value, style)
 	case publicationResult:
 		for _, r := range value.Repositories {
 			fmt.Fprintf(out, "%s %s %s\n", r.Name, r.Ref, r.SHA)

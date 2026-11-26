@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -72,6 +73,11 @@ func runErrorOutput(t *testing.T, args ...string) (string, error) {
 
 func runCapturedOutput(t *testing.T, args ...string) (string, string, error) {
 	t.Helper()
+	return captureCommandOutput(t, func() error { return run(args) })
+}
+
+func captureCommandOutput(t *testing.T, call func() error) (string, string, error) {
+	t.Helper()
 	oldStdout, oldStderr := os.Stdout, os.Stderr
 	stdoutReader, stdoutWriter, err := os.Pipe()
 	if err != nil {
@@ -89,7 +95,7 @@ func runCapturedOutput(t *testing.T, args ...string) (string, string, error) {
 		stdoutWriter.Close()
 		stderrWriter.Close()
 	}()
-	callErr := run(args)
+	callErr := call()
 	if err := stdoutWriter.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -469,6 +475,111 @@ func TestDryRunCreatesNoResources(t *testing.T) {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Fatalf("dry run created %s", path)
 		}
+	}
+}
+
+func TestCLIPullReportsEveryRepository(t *testing.T) {
+	source := cliCleanWorkspace(t)
+	dir := filepath.Dir(source)
+	child := cloneSource(t, dir, "child")
+	extendedGit(t, child, "branch", "stable")
+	missingRemote := filepath.Join(dir, "missing")
+	if err := os.WriteFile(filepath.Join(source, ".gitignore"), []byte("/repos/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeCloneConfig(t, source, fmt.Sprintf(`version: 1
+root:
+  trunk: main
+children:
+  - name: child
+    path: repos/child
+    url: %q
+    trunk: stable
+    depends_on: [blocked]
+  - name: blocked
+    path: repos/blocked
+    url: %q
+    trunk: main
+`, child, missingRemote))
+	root := filepath.Join(dir, "manual")
+	extendedGit(t, dir, "clone", source, root)
+	blocked := filepath.Join(root, "repos", "blocked")
+	if err := os.MkdirAll(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := runJSON[dryRunResult](t, "pull", "--dry-run", "--json", "--workspace", root)
+	var incomplete incompleteResultError
+	if !errors.As(err, &incomplete) || len(plan.Blockers) != 1 || len(plan.Steps) != 3 {
+		t.Fatalf("dry run = %+v, %v", plan, err)
+	}
+	if plan.Steps[0].Repository != "blocked" || plan.Steps[0].Checkpoint != "blocked" ||
+		plan.Steps[1].Repository != "child" || plan.Steps[1].Phase != "clone" ||
+		plan.Steps[2].Repository != "root" || plan.Steps[2].Phase != "pull" {
+		t.Fatalf("unexpected dry-run steps: %+v", plan.Steps)
+	}
+	checkout := filepath.Join(root, "repos", "child")
+	for _, path := range []string{checkout, filepath.Join(root, ".git", "ws")} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("dry run created %s or stat failed: %v", path, err)
+		}
+	}
+
+	exit := 0
+	stdout, stderr, _ := captureCommandOutput(t, func() error {
+		exit = runMain([]string{"pull", "--workspace", root, "--color=always"})
+		return nil
+	})
+	if exit != 1 || stderr != "" || !strings.Contains(stdout, "\x1b[") {
+		t.Fatalf("human pull exited %d: stdout %q, stderr %q", exit, stdout, stderr)
+	}
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	rootHash := abbreviated(extendedGit(t, root, "rev-parse", "main"))
+	childHash := abbreviated(extendedGit(t, child, "rev-parse", "stable"))
+	style := humanStyle{enabled: true}
+	wantLines := []string{
+		style.paint(semanticCyanBold, "manual") + " · root (main)", "├─ blocked", "└─ child (stable)", "",
+		style.paint(semanticRed, "✗ Pull incomplete") + " · 1 cloned · 0 updated · 1 unchanged · 1 failed",
+	}
+	if len(lines) != len(wantLines) {
+		t.Fatalf("unexpected pull tree: %q", stdout)
+	}
+	for index, want := range wantLines {
+		if !strings.Contains(lines[index], want) {
+			t.Errorf("line %d = %q, want %q", index, lines[index], want)
+		}
+	}
+	if !strings.Contains(lines[0], rootHash) || !strings.Contains(lines[1], "preflight:") || !strings.Contains(lines[2], childHash) {
+		t.Fatalf("pull tree omitted revisions or failure detail: %q", stdout)
+	}
+
+	mixed, err := runJSON[pullResult](t, "pull", "--json", "--workspace", root)
+	if !errors.As(err, &incomplete) || mixed.Complete || len(mixed.Repositories) != 3 ||
+		mixed.Repositories[0].Outcome != ws.PullFailed || !strings.Contains(mixed.Repositories[0].Error, "preflight:") ||
+		mixed.Repositories[1].Outcome != ws.PullUnchanged {
+		t.Fatalf("mixed JSON pull = %+v, %v", mixed, err)
+	}
+
+	if err := os.Remove(blocked); err != nil {
+		t.Fatal(err)
+	}
+	extendedGit(t, dir, "clone", child, missingRemote)
+	exit = 1
+	stdout, stderr, _ = captureCommandOutput(t, func() error {
+		exit = runMain([]string{"pull", "--workspace", root, "--json", "--color=always"})
+		return nil
+	})
+	var result pullResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("invalid result %q: %v", stdout, err)
+	}
+	if exit != 0 || stderr != "" || strings.Contains(stdout, "\x1b[") ||
+		result.Command != "pull" || result.Workspace != root || !result.Complete || len(result.Repositories) != 3 {
+		t.Fatalf("JSON pull exited %d with %+v, stderr %q", exit, result, stderr)
+	}
+	if result.Repositories[0].Outcome != ws.PullCloned || result.Repositories[1].Outcome != ws.PullUnchanged ||
+		result.Repositories[1].Path != checkout || len(result.Repositories[1].After) <= len(childHash) {
+		t.Fatalf("retry returned unexpected repositories: %+v", result.Repositories)
 	}
 }
 

@@ -2,7 +2,6 @@ package ws
 
 import (
 	"fmt"
-	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -20,21 +19,6 @@ type PushRepositoryResult struct {
 	Trunk    string
 	Revision string
 	Outcome  PushOutcome
-}
-
-func (e *Engine) pushRepositories() ([]canonicalRepository, error) {
-	ordered, err := e.Config.Order()
-	if err != nil {
-		return nil, err
-	}
-	repositories := make([]canonicalRepository, 0, len(ordered)+1)
-	for _, repository := range ordered {
-		repositories = append(repositories, canonicalRepository{repository: repository, path: filepath.Join(e.Root, repository.Path)})
-	}
-	return append(repositories, canonicalRepository{
-		repository: Repository{Name: "root", Trunk: e.Config.Root.Trunk},
-		path:       e.Root,
-	}), nil
 }
 
 // pushTarget resolves the current local trunk and its destination.
@@ -68,7 +52,7 @@ func pushTarget(repository canonicalRepository) (revision, destination string, e
 // Push publishes child trunks in dependency order, then the workspace root.
 // It returns the completed and skipped results even if a later push fails.
 func (e *Engine) Push() ([]PushRepositoryResult, error) {
-	repositories, err := e.pushRepositories()
+	repositories, err := e.orderedCanonicalTrunks()
 	if err != nil {
 		return nil, err
 	}
